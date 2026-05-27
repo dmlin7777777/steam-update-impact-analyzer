@@ -52,3 +52,23 @@ logs/
 # 临时文件
 *.tmp
 *.bak
+
+# 大学文档 / 项目报告（本地保留，不入库）
+*.docx
+*.pdf
+*.pptx
+
+# 遗留数据目录
+scripts/
+multi_games_data/
+multi_games_data*/
+test/
+test data/
+template/
+config/
+data/
+
+# 遗留输出文件
+*.log
+data_preparation_pipeline.log
+verify_fix.py

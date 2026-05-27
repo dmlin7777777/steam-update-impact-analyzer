@@ -1,10 +1,8 @@
 # core/cleaning.py
-# Column names depend on the actual DataFrame passed in.
-# Primary text column assumed: "review_text"
+# Primary text column: "review_content" (matches actual Steam review DataFrames)
 
 import re
 
-import numpy as np
 import pandas as pd
 
 from config import LLM_REVIEW_THRESHOLD
@@ -25,7 +23,7 @@ def run_cleaning(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Clean a review DataFrame.
 
     Hard deletes (rows discarded entirely, not sent anywhere):
-    - review_text is null or empty
+    - review_content is null or empty
 
     Flagged rows (returned in flagged_df for LLM review, excluded from cleaned_df):
     - text length < 10 characters
@@ -41,11 +39,11 @@ def run_cleaning(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         flagged_df  – suspicious rows for LLM review
     """
     # --- hard delete: null / empty text ---
-    mask_null = df["review_text"].isna() | (df["review_text"].astype(str).str.strip() == "")
+    mask_null = df["review_content"].isna() | (df["review_content"].astype(str).str.strip() == "")
     df = df[~mask_null].copy()
 
     # --- flag suspicious rows ---
-    col = df["review_text"].astype(str)
+    col = df["review_content"].astype(str)
 
     short_text     = col.str.strip().str.len() < 10
     repeated_chars = col.str.strip().apply(_is_repeated_chars)
