@@ -54,7 +54,7 @@ DATA_LABEL_DIR = BASE_DIR / "data_label"
 DATA_NOLABEL_DIR = BASE_DIR / "data_nolabel"
 FEATURES_DIR = BASE_DIR / "features"
 ANALYSIS_DIR = BASE_DIR / "analysis_results"
-MODELS_DIR = BASE_DIR / "models"
+MODEL_DIR = BASE_DIR / "model"   # 实际目录名是 model/ 不是 models/
 
 # 每个 genre 的组合数据路径
 COMBINED_LABEL = {
@@ -206,37 +206,62 @@ python -m pytest tests/test_cleaning.py -v
 
 ### Task 5: 创建 core/inference.py
 
+**模型格式说明（实际目录 model/ 下）：**
+- 情感：`fps_sentiment_bert_model/bert_model_fps/`（HuggingFace safetensors）+ `baseline_model_fps.joblib`
+- 主题：`fps_topic_6class_lda/best_bert_model_topic_category/`（HuggingFace）+ `best_baseline_model_topic_category.joblib`
+- 风险：`risk_scoring_system/risk_thresholds.json`（规则引擎，无模型）
+- 趋势：`trend/final_model_oversample.joblib`（joblib）
+
 **Files:**
 - Create: `core/inference.py`
-- Reference: `scripts/inference/batch_inference.py`（修复占位符问题）
+- Reference: `scripts/inference/batch_inference.py`, `model/` 目录结构
 
 **Step 1: 写 inference.py**
 
 ```python
 import pandas as pd
-import pickle
+import joblib
+import json
 from pathlib import Path
-from config import MODELS_DIR
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+from config import MODEL_DIR
 
 class InferenceEngine:
-    def __init__(self, genre: str):
+    def __init__(self, genre: str, use_bert: bool = False):
         self.genre = genre
+        self.use_bert = use_bert
         self.sentiment_model = None
+        self.sentiment_vectorizer = None
         self.topic_model = None
+        self.topic_vectorizer = None
+        self.topic_label_map = None
+        self.risk_thresholds = None
         self._load_models()
     
     def _load_models(self):
-        model_dir = MODELS_DIR / self.genre
-        sentiment_path = model_dir / "sentiment_advanced_bert.pkl"
-        topic_path = model_dir / "topic_advanced_bert.pkl"
+        # 情感模型（baseline joblib，BERT 可选）
+        sent_dir = MODEL_DIR / "fps_sentiment_bert_model"
+        baseline_path = sent_dir / "baseline_model_fps.joblib"
+        vec_path = sent_dir / "baseline_vectorizer_fps.joblib"
+        if baseline_path.exists():
+            self.sentiment_model = joblib.load(baseline_path)
+            self.sentiment_vectorizer = joblib.load(vec_path)
         
-        if sentiment_path.exists():
-            with open(sentiment_path, "rb") as f:
-                self.sentiment_model = pickle.load(f)
+        # 主题模型（baseline joblib）
+        topic_dir = MODEL_DIR / "fps_topic_6class_lda"
+        t_baseline = topic_dir / "best_baseline_model_topic_category.joblib"
+        t_vec = topic_dir / "best_baseline_vectorizer_topic_category.joblib"
+        t_map = topic_dir / "label_mapping_topic_category.json"
+        if t_baseline.exists():
+            self.topic_model = joblib.load(t_baseline)
+            self.topic_vectorizer = joblib.load(t_vec)
+            self.topic_label_map = json.loads(t_map.read_text())
         
-        if topic_path.exists():
-            with open(topic_path, "rb") as f:
-                self.topic_model = pickle.load(f)
+        # 风险阈值（规则引擎）
+        risk_path = MODEL_DIR / "risk_scoring_system" / "risk_thresholds.json"
+        if risk_path.exists():
+            self.risk_thresholds = json.loads(risk_path.read_text())
     
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
