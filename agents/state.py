@@ -75,11 +75,12 @@ class Recommendations(BaseModel):
 # ── Per-node I/O schemas (validated at each node boundary) ───────────────────
 
 class ScraperOutput(BaseModel):
-    appid:         str
-    game_name:     str
-    n_pre_reviews: int
-    n_post_reviews: int
-    n_patch_notes: int
+    appid:            str
+    game_name:        str
+    n_pre_reviews:    int
+    n_post_reviews:   int
+    n_patch_notes:    int
+    n_event_comments: int = 0   # comments fetched from the update announcement
 
 
 class CleaningOutput(BaseModel):
@@ -119,10 +120,13 @@ class PipelineState(TypedDict):
     post_days:   int       # days after  update → impact  window
 
     # ── Scraped ────────────────────────────────────────────────────────────
-    game_name:    str
-    pre_reviews:  Optional[pd.DataFrame]   # columns: review_id, review_content,
-    post_reviews: Optional[pd.DataFrame]   #   voted_up, timestamp, playtime_hours
-    patch_notes:  list[PatchNote]
+    game_name:      str
+    pre_reviews:    Optional[pd.DataFrame]   # columns: review_id, review_content,
+    post_reviews:   Optional[pd.DataFrame]   #   voted_up, timestamp, playtime_hours
+    patch_notes:    list[PatchNote]
+    event_comments: Optional[pd.DataFrame]   # comments under the specific update
+                                             #   announcement; same column schema
+                                             #   plus a 'source' column = "event_comment"
 
     # ── Cleaned (post-update reviews only) ─────────────────────────────────
     cleaned_reviews: Optional[pd.DataFrame]

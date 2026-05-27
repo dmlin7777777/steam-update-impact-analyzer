@@ -74,24 +74,64 @@ def _select_game(appid: str) -> None:
             st.session_state["patch_notes"] = []
 
 
+def _init_game_cache(appid: str, game_name: str) -> None:
+    """Bulk-scrape up to 60 k reviews and write to local SQLite cache."""
+    from core.bulk_scraper import bulk_scrape
+    from core.local_cache import cache_date_range
+
+    existing = cache_date_range(appid)
+    if existing:
+        st.info(
+            f"Cache already has data for {game_name} "
+            f"({existing[0].date()} → {existing[1].date()}). "
+            f"Skipping initialization."
+        )
+        return
+
+    counter = st.empty()
+    progress = st.progress(0)
+    MAX = 60_000
+
+    def _cb(fetched: int, total: int) -> None:
+        pct = min(total / MAX, 1.0)
+        counter.caption(f"Fetched {total:,} / {MAX:,} reviews…")
+        progress.progress(pct)
+
+    with st.spinner(f"Initializing cache for {game_name}… (this may take a while)"):
+        try:
+            df = bulk_scrape(appid, max_reviews=MAX, progress_cb=_cb, store_in_cache=True)
+            progress.empty()
+            counter.empty()
+            rng = cache_date_range(appid)
+            st.success(
+                f"✅ Cache initialized: {len(df):,} reviews stored "
+                + (f"({rng[0].date()} → {rng[1].date()})" if rng else "")
+            )
+        except Exception as exc:
+            progress.empty()
+            counter.empty()
+            st.warning(f"Cache initialization failed: {exc}. Analysis will use live API.")
+
+
 def _run_pipeline(appid: str, update_date: datetime) -> None:
     """Execute the LangGraph pipeline with streaming progress display."""
     initial: dict = {
-        "appid":           appid,
-        "update_date":     update_date,
-        "pre_days":        ANALYSIS_PRE_DAYS,
-        "post_days":       ANALYSIS_POST_DAYS,
-        "game_name":       st.session_state["game_info"].get("name", ""),
-        "pre_reviews":     None,
-        "post_reviews":    None,
-        "patch_notes":     [],
-        "cleaned_reviews": None,
-        "flagged_reviews": None,
-        "analysis":        None,
-        "llm_review_log":  [],
-        "recommendations": None,
-        "current_step":    "start",
-        "errors":          [],
+        "appid":            appid,
+        "update_date":      update_date,
+        "pre_days":         ANALYSIS_PRE_DAYS,
+        "post_days":        ANALYSIS_POST_DAYS,
+        "game_name":        st.session_state["game_info"].get("name", ""),
+        "pre_reviews":      None,
+        "post_reviews":     None,
+        "patch_notes":      [],
+        "event_comments":   None,
+        "cleaned_reviews":  None,
+        "flagged_reviews":  None,
+        "analysis":         None,
+        "llm_review_log":   [],
+        "recommendations":  None,
+        "current_step":     "start",
+        "errors":           [],
     }
 
     _NODE_LABELS = {
@@ -150,6 +190,14 @@ with st.sidebar:
     # ── Add custom game ───────────────────────────────────────────────────────
     with st.expander("➕ Add game by AppID"):
         custom_id = st.text_input("Steam AppID", placeholder="e.g. 292030", key="custom_id_input")
+        init_cache = st.checkbox(
+            "Initialize review cache (up to 60 k reviews, ~5–30 min)",
+            value=False,
+            key="init_cache_checkbox",
+            help="Scrapes the most recent 60,000 reviews and stores them locally. "
+                 "Required for historical analysis beyond the live API window (~30 days). "
+                 "Skip if you only need recent updates.",
+        )
         if st.button("Add", key="add_custom_game") and custom_id.strip():
             appid_str = custom_id.strip()
             if appid_str in all_games:
@@ -160,9 +208,14 @@ with st.sidebar:
                         info = _fetch_app_info_cached(appid_str)
                         st.session_state["custom_games"][appid_str] = info
                         st.success(f"Added: {info['name']}")
-                        st.rerun()
                     except SteamAPIError as exc:
                         st.error(f"Could not fetch app info: {exc}")
+                        st.stop()
+
+                if init_cache:
+                    _init_game_cache(appid_str, info.get("name", appid_str))
+
+                st.rerun()
 
 
 # ── Main area ─────────────────────────────────────────────────────────────────

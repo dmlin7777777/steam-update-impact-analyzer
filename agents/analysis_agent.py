@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from agents.state import PipelineState
 from core.analysis import run_analysis
 from core.features import extract_features
@@ -10,30 +12,50 @@ from core.features import extract_features
 
 def analysis_node(state: PipelineState) -> dict:
     """
-    Reads:  pre_reviews, cleaned_reviews (post-update)
+    Reads:  pre_reviews, cleaned_reviews (post-update), event_comments
     Writes: analysis, current_step
 
-    pre_reviews also get feature extraction here so both windows
-    are processed through the same NLP pipeline.
+    Event comments (from the update announcement page) are merged into the
+    post-update DataFrame before analysis.  They are treated as high-signal
+    post-update data since they are anchored to the specific update.
+
+    pre_reviews also get feature extraction here so both windows are processed
+    through the same NLP pipeline.
     """
-    pre_df  = state.get("pre_reviews")
-    post_df = state.get("cleaned_reviews")
+    pre_df      = state.get("pre_reviews")
+    post_df     = state.get("cleaned_reviews")
+    event_df    = state.get("event_comments")
 
     errors: list[str] = []
 
     if pre_df is None or pre_df.empty:
         errors.append("[analysis] pre_reviews is empty — baseline will be zero")
-        import pandas as pd
         pre_df = pd.DataFrame()
 
     if post_df is None or post_df.empty:
         errors.append("[analysis] cleaned_reviews is empty — nothing to analyse")
-        import pandas as pd
         post_df = pd.DataFrame()
 
-    # Feature extraction on pre-update reviews (post already done in cleaning_node)
+    # Merge event comments into post-update window
+    # Event comments carry higher signal: they are direct reactions to THIS update.
+    # We append them so they participate in sentiment stats and topic tagging.
+    post_df = _merge_event_comments(post_df, event_df, errors)
+
+    # Feature extraction on pre-update reviews (post already done in cleaning_node,
+    # except for any newly appended event-comment rows)
     if not pre_df.empty and "vader_compound" not in pre_df.columns:
         pre_df = extract_features(pre_df)
+
+    if not post_df.empty:
+        # Re-run features on rows that may be missing them (e.g. event comments)
+        missing_feat = post_df["vader_compound"].isna() if "vader_compound" in post_df.columns \
+                       else pd.Series(True, index=post_df.index)
+        if missing_feat.any():
+            # Avoid redundant computation: only process new rows
+            needs_feat = post_df[missing_feat].copy()
+            has_feat   = post_df[~missing_feat]
+            needs_feat = extract_features(needs_feat)
+            post_df    = pd.concat([has_feat, needs_feat], ignore_index=True)
 
     analysis = run_analysis(pre_df, post_df)
 
@@ -42,6 +64,43 @@ def analysis_node(state: PipelineState) -> dict:
         "current_step": "analysis_done",
         **({"errors": errors} if errors else {}),
     }
+
+
+def _merge_event_comments(
+    post_df: pd.DataFrame,
+    event_df: pd.DataFrame | None,
+    errors: list[str],
+) -> pd.DataFrame:
+    """
+    Append event_comments to post_df.
+    Normalises the event_df columns to match the review schema before concat.
+    """
+    if event_df is None or event_df.empty:
+        return post_df
+
+    # Ensure event_df has the columns post_df expects
+    needed = ["review_id", "review_content", "voted_up",
+              "timestamp", "playtime_hours", "votes_up", "votes_funny"]
+    missing_cols = [c for c in needed if c not in event_df.columns]
+    if missing_cols:
+        errors.append(
+            f"[analysis] event_comments missing columns {missing_cols}; skipping merge."
+        )
+        return post_df
+
+    # Add 'source' column to post_df for traceability
+    if "source" not in post_df.columns:
+        post_df = post_df.copy()
+        post_df["source"] = "review"
+
+    ec_subset = event_df[needed + (["source"] if "source" in event_df.columns else [])].copy()
+    if "source" not in ec_subset.columns:
+        ec_subset["source"] = "event_comment"
+
+    errors.append(
+        f"[analysis] ℹ️  Merged {len(ec_subset)} event comments into post-update window."
+    )
+    return pd.concat([post_df, ec_subset], ignore_index=True)
 
 
 def should_run_llm_sentiment(state: PipelineState) -> str:
