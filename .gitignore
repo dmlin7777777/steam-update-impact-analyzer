@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 数据文件（体积大，不入库）
+*.xlsx
+*.csv
+*.parquet
+*.zip
+data_label/
+data_nolabel/
+analysis_results/
+features/
+
+# 模型文件（体积大）
+model/
+models/
+*.pkl
+*.joblib
+*.pt
+*.bin
+*.safetensors
+
+# Claude Code
+.claude/
+
+# 环境
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.code-workspace
+
+# Streamlit
+.streamlit/
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.bak
