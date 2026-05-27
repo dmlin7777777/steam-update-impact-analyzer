@@ -42,7 +42,8 @@ FEATURE_STORE = {
 }
 
 # LLM 设置
-LLM_MODEL = "claude-sonnet-4-6"
+LLM_MODEL = "claude-sonnet-4-6"          # LLM review agent 使用
+LLM_MODEL_LIGHT = "claude-haiku-4-5-20251001"  # 轻量任务
 LLM_REVIEW_THRESHOLD = 0.05   # flagged 占比超过 5% 触发 LLM 复查
 RISK_GRAY_ZONE = (1.5, 3.0)   # 灰色地带触发 LLM 风险复核
 
