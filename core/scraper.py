@@ -7,13 +7,21 @@
 #   fetch_patch_notes(appid, since, n)    → list[dict]
 #
 # DataFrame schema produced by fetch_reviews:
-#   review_id         str   Steam recommendationid
+#   review_id         str   Steam recommendationid (or surrogate for cached rows)
 #   review_content    str   raw review text (normalised column name)
 #   voted_up          bool  recommended or not
 #   timestamp         datetime (UTC-aware)
 #   playtime_hours    float hours played at review time
 #   votes_up          int   helpful votes
 #   votes_funny       int   funny votes
+#
+# Data-source priority
+# --------------------
+# 1. Local SQLite cache (core/local_cache.py) — populated offline by
+#    scripts/import_cache.py.  Covers any historical window that was
+#    imported.  Zero network cost, instant.
+# 2. Live Steam API — cursor-paginated, newest-first.  Works well for
+#    updates within the last ~30 days on high-traffic games.
 
 from __future__ import annotations
 
@@ -90,19 +98,39 @@ def fetch_reviews(
     """
     Fetch English reviews posted within [start_dt, end_dt].
 
-    Uses cursor-based pagination; stops early once reviews fall before start_dt
-    (reviews come back newest-first with filter=recent).
+    Data-source priority:
+      1. Local SQLite cache — if the requested window is fully covered by
+         cached data, returns instantly with no network call.
+      2. Live Steam API — cursor-paginated, newest-first.
+
+    Historical-data limitation (live API only): Steam returns reviews
+    newest-first with no date-range parameter.  For very active games
+    (CS2, Dota 2 …) windows more than ~30 days in the past require paging
+    through huge volumes; max_reviews acts as the budget.
 
     Args:
         appid:       Steam App ID string.
-        start_dt:    Window start (UTC-aware).
-        end_dt:      Window end   (UTC-aware).
-        max_reviews: Hard cap on rows returned.
+        start_dt:    Window start (UTC-aware, inclusive).
+        end_dt:      Window end   (UTC-aware, inclusive).
+        max_reviews: Hard cap on rows scanned by the live API (not cached rows).
 
     Returns:
         DataFrame with columns defined in module docstring.
         Empty DataFrame (correct columns) if no reviews found.
     """
+    # ── 1. Try local cache first ──────────────────────────────────────────────
+    try:
+        from core.local_cache import query_reviews as _cache_query, cache_date_range
+        cached_range = cache_date_range(appid)
+        if cached_range is not None:
+            cache_min, cache_max = cached_range
+            _start = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
+            _end   = end_dt   if end_dt.tzinfo   else end_dt.replace(tzinfo=timezone.utc)
+            # Use cache when requested window is fully within cached range
+            if cache_min <= _start and _end <= cache_max:
+                return _cache_query(appid, _start, _end)
+    except Exception:
+        pass  # cache unavailable — fall through to live API
     url    = STEAM_REVIEWS_URL.format(appid=appid)
     params = {
         "json":          1,
@@ -120,8 +148,9 @@ def fetch_reviews(
         end_dt = end_dt.replace(tzinfo=timezone.utc)
 
     rows: list[dict] = []
+    scanned: int = 0          # total reviews examined (including skipped future ones)
 
-    while len(rows) < max_reviews:
+    while scanned < max_reviews:
         data = _get(url, params)
 
         if data.get("success") != 1:
@@ -133,6 +162,7 @@ def fetch_reviews(
 
         reached_before_window = False
         for rev in batch:
+            scanned += 1
             ts = datetime.fromtimestamp(rev["timestamp_created"], tz=timezone.utc)
 
             if ts < start_dt:
@@ -152,6 +182,7 @@ def fetch_reviews(
                     "votes_up":    rev.get("votes_up", 0),
                     "votes_funny": rev.get("votes_funny", 0),
                 })
+            # else: review is in the future relative to end_dt — skip, keep scanning
 
         if reached_before_window:
             break
@@ -204,8 +235,13 @@ def fetch_patch_notes(
         if published_at < since_dt:
             continue
 
-        # Identify patch notes by Steam tags or title keywords
-        tags       = {t.get("tag", "").lower() for t in (item.get("tags") or [])}
+        # Identify patch notes by Steam tags or title keywords.
+        # Tags field is a plain list[str], e.g. ["patchnotes"].
+        raw_tags    = item.get("tags") or []
+        tags        = {
+            (t.get("tag", "") if isinstance(t, dict) else str(t)).lower()
+            for t in raw_tags
+        }
         title_words = set(item.get("title", "").lower().split())
 
         is_update = bool(

@@ -3,8 +3,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 
 # ── Directories ───────────────────────────────────────────────────────────────
-CACHE_DIR = BASE_DIR / ".cache"          # API response cache
-OUTPUT_DIR = BASE_DIR / "output"         # analysis results, reports
+CACHE_DIR      = BASE_DIR / ".cache"               # API response cache
+OUTPUT_DIR     = BASE_DIR / "output"               # analysis results, reports
+REVIEW_CACHE_DB = BASE_DIR / "data" / "reviews.db" # local SQLite review cache
 
 # ── Steam API endpoints ───────────────────────────────────────────────────────
 STEAM_REVIEWS_URL     = "https://store.steampowered.com/appreviews/{appid}"
