@@ -34,11 +34,11 @@ MODEL_PATHS = {
     }
 }
 
-# Feature store：预计算特征目录（按 genre 分）
+# Feature store：预计算特征文件（含弱标签的最终版本）
 FEATURE_STORE = {
-    "fps":      FEATURES_DIR / "fps",
-    "leisure":  FEATURES_DIR / "leisure",
-    "strategy": FEATURES_DIR / "strategy",
+    "fps":      FEATURES_DIR / "fps"      / "gpu_optimized_features_fps_exclflagged_enhanced_features_with_weaklabels.parquet",
+    "leisure":  FEATURES_DIR / "leisure"  / "gpu_optimized_features_leisure_exclflagged_enhanced_features_with_weaklabels.parquet",
+    "strategy": FEATURES_DIR / "strategy" / "gpu_optimized_features_strategy_exclflagged_enhanced_features_with_weaklabels.parquet",
 }
 
 # LLM 设置
