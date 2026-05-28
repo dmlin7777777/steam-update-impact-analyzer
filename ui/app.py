@@ -74,10 +74,59 @@ def _select_game(appid: str) -> None:
             st.session_state["patch_notes"] = []
 
 
-def _init_game_cache(appid: str, game_name: str) -> None:
-    """Bulk-scrape up to 60 k reviews and write to local SQLite cache."""
+def _init_game_cache(
+    appid: str,
+    game_name: str,
+    mode: str,                  # "scrape_custom" | "scrape_full" | "upload"
+    max_reviews: int = 60_000,  # used when mode == "scrape_custom"
+    uploaded_file=None,         # st.UploadedFile, used when mode == "upload"
+) -> None:
+    """
+    Populate the local SQLite cache for a game.
+
+    Modes
+    -----
+    scrape_custom : paginate Steam API up to *max_reviews* reviews.
+    scrape_full   : paginate until cursor is exhausted (no cap).
+    upload        : import a user-supplied CSV / Excel file.
+                    Legacy schema (SteamID / played_hours / review_date) is
+                    auto-detected by checking for a 'SteamID' column.
+    """
+    from core.local_cache import cache_date_range, import_dataframe
+
+    # ── upload mode ──────────────────────────────────────────────────────────
+    if mode == "upload":
+        if uploaded_file is None:
+            st.warning("No file provided.")
+            return
+        import pandas as pd
+
+        try:
+            fname = uploaded_file.name.lower()
+            if fname.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+        except Exception as exc:
+            st.error(f"Could not read file: {exc}")
+            return
+
+        legacy = "SteamID" in df.columns
+        with st.spinner(f"Importing {len(df):,} rows into cache…"):
+            try:
+                n = import_dataframe(df, appid, legacy=legacy)
+                rng = cache_date_range(appid)
+                st.success(
+                    f"✅ Imported {n:,} reviews"
+                    + (f" ({rng[0].date()} → {rng[1].date()})" if rng else "")
+                    + (" (legacy schema detected)" if legacy else "")
+                )
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+        return
+
+    # ── scrape modes ─────────────────────────────────────────────────────────
     from core.bulk_scraper import bulk_scrape
-    from core.local_cache import cache_date_range
 
     existing = cache_date_range(appid)
     if existing:
@@ -88,18 +137,21 @@ def _init_game_cache(appid: str, game_name: str) -> None:
         )
         return
 
-    counter = st.empty()
+    cap = max_reviews if mode == "scrape_custom" else None   # None = no cap
+    cap_label = f"{cap:,}" if cap else "∞"
+
+    counter  = st.empty()
     progress = st.progress(0)
-    MAX = 60_000
 
     def _cb(fetched: int, total: int) -> None:
-        pct = min(total / MAX, 1.0)
-        counter.caption(f"Fetched {total:,} / {MAX:,} reviews…")
-        progress.progress(pct)
+        pct = min(total / cap, 1.0) if cap else 0.0
+        counter.caption(f"Fetched {total:,} / {cap_label} reviews…")
+        if cap:
+            progress.progress(pct)
 
     with st.spinner(f"Initializing cache for {game_name}… (this may take a while)"):
         try:
-            df = bulk_scrape(appid, max_reviews=MAX, progress_cb=_cb, store_in_cache=True)
+            df = bulk_scrape(appid, max_reviews=cap, progress_cb=_cb, store_in_cache=True)
             progress.empty()
             counter.empty()
             rng = cache_date_range(appid)
@@ -190,14 +242,44 @@ with st.sidebar:
     # ── Add custom game ───────────────────────────────────────────────────────
     with st.expander("➕ Add game by AppID"):
         custom_id = st.text_input("Steam AppID", placeholder="e.g. 292030", key="custom_id_input")
-        init_cache = st.checkbox(
-            "Initialize review cache (up to 60 k reviews, ~5–30 min)",
-            value=False,
-            key="init_cache_checkbox",
-            help="Scrapes the most recent 60,000 reviews and stores them locally. "
-                 "Required for historical analysis beyond the live API window (~30 days). "
-                 "Skip if you only need recent updates.",
+
+        st.caption("**Review cache** — required for historical analysis (> 30 days ago)")
+        cache_mode = st.radio(
+            "Cache initialization",
+            options=["skip", "scrape_custom", "scrape_full", "upload"],
+            format_func=lambda m: {
+                "skip":          "⏭️  Skip — live API only (recent updates only)",
+                "scrape_custom": "🔢  Scrape latest N reviews",
+                "scrape_full":   "📥  Scrape all reviews (no limit, may take hours)",
+                "upload":        "📂  Upload my own data file (.csv / .xlsx)",
+            }[m],
+            index=0,
+            key="cache_mode_radio",
         )
+
+        # Conditional widgets per mode
+        scrape_n    = 10_000
+        upload_file = None
+        if cache_mode == "scrape_custom":
+            scrape_n = st.number_input(
+                "Number of reviews to scrape",
+                min_value=1_000, max_value=500_000,
+                value=20_000, step=1_000,
+                key="scrape_n_input",
+                help="Steam returns reviews newest-first. "
+                     "Larger numbers give better historical coverage but take longer.",
+            )
+        elif cache_mode == "upload":
+            upload_file = st.file_uploader(
+                "Data file",
+                type=["csv", "xlsx"],
+                key="cache_upload",
+                help="CSV or Excel with review data. "
+                     "Legacy schema (SteamID / played_hours / review_date) is auto-detected.",
+            )
+            if upload_file is None:
+                st.caption("⚠️  No file selected — upload will be skipped.")
+
         if st.button("Add", key="add_custom_game") and custom_id.strip():
             appid_str = custom_id.strip()
             if appid_str in all_games:
@@ -212,8 +294,14 @@ with st.sidebar:
                         st.error(f"Could not fetch app info: {exc}")
                         st.stop()
 
-                if init_cache:
-                    _init_game_cache(appid_str, info.get("name", appid_str))
+                if cache_mode != "skip":
+                    _init_game_cache(
+                        appid_str,
+                        info.get("name", appid_str),
+                        mode=cache_mode,
+                        max_reviews=int(scrape_n),
+                        uploaded_file=upload_file,
+                    )
 
                 st.rerun()
 
