@@ -50,12 +50,13 @@ Keep narrative under 300 words. Include 3-6 recommendation items.
 
 def recommendation_node(state: PipelineState) -> dict:
     """
-    Reads:  analysis, patch_notes, game_name
+    Reads:  analysis, patch_notes, game_name, event_comments
     Writes: recommendations, current_step
     """
-    analysis    = state.get("analysis")
-    patch_notes = state.get("patch_notes", [])
-    game_name   = state.get("game_name", "Unknown Game")
+    analysis      = state.get("analysis")
+    patch_notes   = state.get("patch_notes", [])
+    game_name     = state.get("game_name", "Unknown Game")
+    event_df      = state.get("event_comments")
 
     if analysis is None:
         return {
@@ -99,13 +100,37 @@ def recommendation_node(state: PipelineState) -> dict:
     else:
         context_parts += ["", "=== PATCH NOTES ===", "(none available)"]
 
+    # Event comments — direct player reactions under the update announcement.
+    # These are higher-signal than general reviews and should be weighted accordingly.
+    if event_df is not None and not event_df.empty:
+        import pandas as pd
+        n_ec = len(event_df)
+        context_parts += ["", f"=== ANNOUNCEMENT PAGE COMMENTS ({n_ec} total) ==="]
+        context_parts.append(
+            "These comments were posted directly under the update announcement "
+            "and represent the most direct player reaction to this specific update."
+        )
+        # Sample up to 10 comments, prefer those with more upvotes
+        sample = event_df.copy()
+        if "votes_up" in sample.columns:
+            sample = sample.sort_values("votes_up", ascending=False)
+        for _, row in sample.head(10).iterrows():
+            text    = str(row.get("review_content", "")).strip()[:200]
+            upvotes = int(row.get("votes_up", 0))
+            up_str  = f"  [{upvotes}👍]" if upvotes > 0 else ""
+            context_parts.append(f"  •{up_str} {text}")
+    else:
+        context_parts += ["", "=== ANNOUNCEMENT PAGE COMMENTS ===",
+                          "(none available — game may use JS-rendered comments)"]
+
     context = "\n".join(context_parts)
 
     try:
         msg = _client.messages.create(
             model=LLM_MODEL,
             max_tokens=1500,
-            system=_SYSTEM,
+            system=[{"type": "text", "text": _SYSTEM,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": context}],
         )
         raw    = msg.content[0].text.strip()

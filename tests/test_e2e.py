@@ -92,14 +92,20 @@ _FAKE_LLM_RECO = json.dumps({
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+@patch("agents.scraper_agent.fetch_event_comments")
 @patch("core.scraper.requests.get")
 @patch("anthropic.Anthropic")
-def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get):
+def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get, mock_fetch_ec):
     """Full graph smoke test with mocked Steam API and Anthropic API."""
     from graph import app
 
     # --- Mock Steam API -------------------------------------------------
-    def fake_get(url, params=None, timeout=None):
+    # NOTE: Do NOT also patch core.event_comments.requests.get here.
+    # Both core.scraper and core.event_comments import the same 'requests'
+    # module object, so a second patch on requests.get would overwrite the
+    # first, causing _get() to use the wrong mock.  We mock fetch_event_comments
+    # at the function level instead to avoid the conflict.
+    def fake_get(url, params=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         if "appdetails" in url:
@@ -111,6 +117,8 @@ def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get):
         return resp
 
     mock_get.side_effect = fake_get
+    # Return zero event comments (graceful empty-list path)
+    mock_fetch_ec.return_value = []
 
     # --- Mock Anthropic client ------------------------------------------
     def _make_content(text):
@@ -139,21 +147,22 @@ def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get):
 
     # --- Run graph ------------------------------------------------------
     initial: PipelineState = {
-        "appid":       "730",
-        "update_date": datetime(2024, 3, 20, tzinfo=timezone.utc),
-        "pre_days":    7,
-        "post_days":   7,
-        "game_name":   "",
-        "pre_reviews": None,
-        "post_reviews": None,
-        "patch_notes": [],
+        "appid":          "730",
+        "update_date":    datetime(2024, 3, 20, tzinfo=timezone.utc),
+        "pre_days":       7,
+        "post_days":      7,
+        "game_name":      "",
+        "pre_reviews":    None,
+        "post_reviews":   None,
+        "patch_notes":    [],
+        "event_comments": None,
         "cleaned_reviews": None,
         "flagged_reviews": None,
-        "analysis":    None,
+        "analysis":       None,
         "llm_review_log": [],
         "recommendations": None,
-        "current_step": "start",
-        "errors":      [],
+        "current_step":   "start",
+        "errors":         [],
     }
 
     result = app.invoke(initial)

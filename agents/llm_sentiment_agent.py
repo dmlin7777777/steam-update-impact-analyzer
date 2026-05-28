@@ -51,7 +51,8 @@ def llm_sentiment_node(state: PipelineState) -> dict:
         msg = _client.messages.create(
             model=LLM_MODEL_LIGHT,
             max_tokens=256,
-            system=_SYSTEM,
+            system=[{"type": "text", "text": _SYSTEM,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": numbered}],
         )
         raw     = msg.content[0].text.strip()

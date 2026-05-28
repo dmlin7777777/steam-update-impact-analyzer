@@ -86,7 +86,8 @@ def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
             msg = _client.messages.create(
                 model=LLM_MODEL_LIGHT,
                 max_tokens=512,
-                system=_TOPIC_SYSTEM,
+                system=[{"type": "text", "text": _TOPIC_SYSTEM,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": numbered}],
             )
             raw = msg.content[0].text.strip()

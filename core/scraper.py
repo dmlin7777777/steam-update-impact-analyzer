@@ -119,16 +119,18 @@ def fetch_reviews(
         Empty DataFrame (correct columns) if no reviews found.
     """
     # ── 1. Try local cache first ──────────────────────────────────────────────
+    # Strategy:
+    #   • If the cache holds ANY data for this appid, prefer it.  Historical
+    #     windows beyond ~30 days can't be retrieved via the live API anyway, so
+    #     returning what the cache has (even partial) is always the right call.
+    #   • The live API is only used when no cache exists at all for this appid.
     try:
         from core.local_cache import query_reviews as _cache_query, cache_date_range
         cached_range = cache_date_range(appid)
         if cached_range is not None:
-            cache_min, cache_max = cached_range
             _start = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
             _end   = end_dt   if end_dt.tzinfo   else end_dt.replace(tzinfo=timezone.utc)
-            # Use cache when requested window is fully within cached range
-            if cache_min <= _start and _end <= cache_max:
-                return _cache_query(appid, _start, _end)
+            return _cache_query(appid, _start, _end)
     except Exception:
         pass  # cache unavailable — fall through to live API
     url    = STEAM_REVIEWS_URL.format(appid=appid)

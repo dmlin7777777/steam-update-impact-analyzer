@@ -46,7 +46,7 @@ _EMPTY_COLS = [
 
 def bulk_scrape(
     appid: str,
-    max_reviews: int = 60_000,
+    max_reviews: Optional[int] = 60_000,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     store_in_cache: bool = True,
 ) -> pd.DataFrame:
@@ -56,7 +56,8 @@ def bulk_scrape(
 
     Args:
         appid:         Steam App ID string.
-        max_reviews:   Maximum rows to fetch (hard cap).
+        max_reviews:   Maximum rows to fetch (hard cap).  Pass None to scrape
+                       until the Steam cursor is exhausted (all reviews).
         progress_cb:   Optional callback(fetched, total_so_far) called after
                        each page.  Use for progress bars / spinners.
         store_in_cache: If True (default), insert rows into the local cache.
@@ -78,7 +79,7 @@ def bulk_scrape(
     rows: list[dict] = []
     cursor = "*"
 
-    while len(rows) < max_reviews:
+    while max_reviews is None or len(rows) < max_reviews:
         params["cursor"] = cursor
         data = _get(url, params)
 
@@ -106,7 +107,7 @@ def bulk_scrape(
         if progress_cb:
             progress_cb(len(batch), len(rows))
 
-        if len(rows) >= max_reviews:
+        if max_reviews is not None and len(rows) >= max_reviews:
             rows = rows[:max_reviews]
             break
 

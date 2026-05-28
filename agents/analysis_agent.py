@@ -61,6 +61,7 @@ def analysis_node(state: PipelineState) -> dict:
 
     return {
         "analysis":     analysis,
+        "pre_reviews":  pre_df,    # return enriched version (now has vader_compound)
         "current_step": "analysis_done",
         **({"errors": errors} if errors else {}),
     }
