@@ -57,6 +57,21 @@ CREATE TABLE IF NOT EXISTS reviews (
     PRIMARY KEY (appid, review_id)
 );
 CREATE INDEX IF NOT EXISTS idx_appid_ts ON reviews (appid, timestamp);
+
+CREATE TABLE IF NOT EXISTS event_comments (
+    appid            TEXT NOT NULL,
+    forum_topic_id   TEXT NOT NULL,
+    event_gid        TEXT NOT NULL DEFAULT '',
+    event_name       TEXT NOT NULL DEFAULT '',
+    event_date       TEXT NOT NULL DEFAULT '',
+    comment_id       TEXT NOT NULL,
+    comment_content  TEXT NOT NULL,
+    author           TEXT NOT NULL DEFAULT '',
+    upvotes          INT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (appid, forum_topic_id, comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ec_appid_ftid
+    ON event_comments (appid, forum_topic_id);
 """
 
 
@@ -297,4 +312,126 @@ def cache_row_count(appid: str) -> int:
     with _connect() as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM reviews WHERE appid=?", (str(appid),)
+        ).fetchone()[0]
+
+
+# ── Event comment cache ──────────────────────────────────────────────────────
+
+def store_event_comments(
+    appid: str,
+    forum_topic_id: str,
+    event_gid: str,
+    event_name: str,
+    event_date: str,
+    comments: list[dict],
+) -> int:
+    """
+    Store scraped event comments into the cache.
+
+    Args:
+        appid:           Steam App ID.
+        forum_topic_id:  The GID used for /app/{appid}/eventcomments/{ftid}.
+        event_gid:       The partner event GID (for reference).
+        event_name:      Event title (for display).
+        event_date:      ISO date string of the event.
+        comments:        Raw comment dicts from fetch_event_comments().
+
+    Returns:
+        Number of new rows inserted.
+    """
+    init_db()
+    if not comments:
+        return 0
+
+    rows = []
+    for c in comments:
+        cid = c.get("comment_id", "")
+        content = c.get("content", "").strip()
+        if not content:
+            continue
+        rows.append((
+            str(appid), forum_topic_id, event_gid, event_name, event_date,
+            cid, content, c.get("author", ""), int(c.get("upvotes", 0)),
+        ))
+
+    sql = """
+        INSERT OR IGNORE INTO event_comments
+            (appid, forum_topic_id, event_gid, event_name, event_date,
+             comment_id, comment_content, author, upvotes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    inserted = 0
+    with _connect() as conn:
+        for i in range(0, len(rows), 2000):
+            batch = rows[i : i + 2000]
+            cur = conn.executemany(sql, batch)
+            inserted += cur.rowcount
+    return inserted
+
+
+def query_event_comments(
+    appid: str,
+    forum_topic_id: str = "",
+) -> list[dict]:
+    """
+    Query cached event comments.
+
+    If forum_topic_id is given, returns comments for that specific event.
+    Otherwise returns ALL cached event comments for the appid.
+
+    Returns list of dicts with keys: comment_id, content, author, upvotes,
+    forum_topic_id, event_name, event_date.
+    """
+    init_db()
+    if forum_topic_id:
+        sql = """
+            SELECT comment_id, comment_content, author, upvotes,
+                   forum_topic_id, event_name, event_date
+            FROM   event_comments
+            WHERE  appid = ? AND forum_topic_id = ?
+        """
+        params = (str(appid), forum_topic_id)
+    else:
+        sql = """
+            SELECT comment_id, comment_content, author, upvotes,
+                   forum_topic_id, event_name, event_date
+            FROM   event_comments
+            WHERE  appid = ?
+        """
+        params = (str(appid),)
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [
+        {
+            "comment_id":      r[0],
+            "content":         r[1],
+            "author":          r[2],
+            "upvotes":         r[3],
+            "forum_topic_id":  r[4],
+            "event_name":      r[5],
+            "event_date":      r[6],
+        }
+        for r in rows
+    ]
+
+
+def cached_event_topic_ids(appid: str) -> list[str]:
+    """Return list of forum_topic_ids already cached for this appid."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT forum_topic_id FROM event_comments WHERE appid=?",
+            (str(appid),),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def event_comment_count(appid: str) -> int:
+    """Total number of cached event comments for this appid."""
+    init_db()
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM event_comments WHERE appid=?", (str(appid),)
         ).fetchone()[0]

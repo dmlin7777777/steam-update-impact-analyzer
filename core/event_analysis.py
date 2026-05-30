@@ -254,18 +254,26 @@ Neutral:  {aggregated['neutral']} ({neu_pct:.1f}%)
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
+_MAX_WORKERS = 5   # parallel Map calls
+
+
 def analyse_event_comments(
     comments: list[str],
     patch_notes_text: str,
     chunk_size: int = CHUNK_SIZE,
+    max_workers: int = _MAX_WORKERS,
 ) -> Optional[EventCommentAnalysis]:
     """
     Full Map-Reduce analysis of event comments.
 
+    Map phase runs in parallel (up to max_workers threads) to handle
+    large comment volumes (1000+ comments) without excessive wall-clock time.
+
     Args:
         comments:         List of raw comment strings (no preprocessing).
         patch_notes_text: Patch notes for context (what the update changed).
-        chunk_size:       Comments per Map call (default 100).
+        chunk_size:       Comments per Map call (default 50).
+        max_workers:      Max parallel Map calls (default 5).
 
     Returns:
         EventCommentAnalysis with sentiment counts, themes, quotes,
@@ -274,14 +282,24 @@ def analyse_event_comments(
     if not comments:
         return None
 
-    # ── Map ───────────────────────────────────────────────────────────────────
-    n_chunks = math.ceil(len(comments) / chunk_size)
-    chunks: list[ChunkAnalysis] = []
+    # ── Map (parallel) ────────────────────────────────────────────────────────
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for i in range(n_chunks):
-        batch = comments[i * chunk_size : (i + 1) * chunk_size]
-        result = _map_chunk(batch, patch_notes_text)
-        chunks.append(result)
+    batches = [
+        comments[i : i + chunk_size]
+        for i in range(0, len(comments), chunk_size)
+    ]
+
+    chunks: list[ChunkAnalysis] = [ChunkAnalysis()] * len(batches)  # placeholder
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {
+            pool.submit(_map_chunk, batch, patch_notes_text): idx
+            for idx, batch in enumerate(batches)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            chunks[idx] = future.result()
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     agg = _aggregate_chunks(chunks)

@@ -136,23 +136,25 @@ def _fetch_event_comments_via_partner_api(
     errors: list[str],
 ):
     """
-    Find the event closest to update_date using Steam's partner events API,
-    extract its forum_topic_id, and fetch comments via the eventcomments endpoint.
+    Find the event closest to update_date, fetch its comments.
 
-    Why partner events API?
-    -----------------------
-    Steam's GetNewsForApp returns news GIDs and URLs, but these do NOT map to
-    the eventcomments endpoint for newer games. The partner events API returns
-    a forum_topic_id field that IS the correct GID for eventcomments — works
-    for both old and new announcement formats.
+    Data flow:
+      1. Check local cache first (instant).
+      2. If cache miss: call partner events API → get forum_topic_id →
+         scrape eventcomments → store in cache.
+
+    The partner events API returns forum_topic_id — the correct GID for
+    /app/{appid}/eventcomments/{ftid}, working for all announcement formats.
     """
     import pandas as pd
+    from core.local_cache import (
+        query_event_comments, store_event_comments, cached_event_topic_ids,
+    )
 
-    # Step 1: Get partner events
+    # Step 1: Get partner events (fast — just metadata, no comments)
     events = _fetch_partner_events(appid)
     if not events:
         errors.append("[scraper] Partner events API returned no events.")
-        # Fallback: try patch notes directly
         return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)
 
     # Step 2: Sort events by proximity to update_date
@@ -160,13 +162,13 @@ def _fetch_event_comments_via_partner_api(
         ts = e.get("rtime32_start_time", 0)
         if not ts:
             return float("inf")
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        return abs((dt - update_date).total_seconds())
+        return abs(ts - update_date.timestamp())
 
     sorted_events = sorted(events, key=_event_distance)
+    cached_ftids = set(cached_event_topic_ids(appid))
 
-    # Step 3: Try each event's forum_topic_id
-    for i, event in enumerate(sorted_events[:20]):  # check up to 20 closest
+    # Step 3: Try each event — cache first, then live scrape
+    for event in sorted_events[:20]:
         ftid = event.get("forum_topic_id", "")
         if not ftid:
             continue
@@ -174,12 +176,34 @@ def _fetch_event_comments_via_partner_api(
         ts = event.get("rtime32_start_time", 0)
         event_date = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
         event_name = event.get("event_name", "")
+        event_gid  = event.get("gid", "")
 
+        # Try cache first
+        if ftid in cached_ftids:
+            cached = query_event_comments(appid, ftid)
+            if cached:
+                df = comments_to_dataframe(
+                    cached, fallback_timestamp=event_date or update_date,
+                )
+                if not df.empty:
+                    errors.append(
+                        f"[scraper] Event comments: {len(df)} from cache "
+                        f"'{event_name}' (forum_topic_id={ftid})."
+                    )
+                    return df
+
+        # Cache miss — scrape live
         raw = fetch_event_comments(appid, forum_topic_id=ftid)
         if raw:
-            # Use the event's own timestamp as fallback for comment timestamps
-            fallback_ts = event_date or update_date
-            df = comments_to_dataframe(raw, fallback_timestamp=fallback_ts)
+            # Store in cache for next time
+            date_str = event_date.strftime("%Y-%m-%d") if event_date else ""
+            store_event_comments(
+                appid, ftid, event_gid, event_name, date_str, raw,
+            )
+
+            df = comments_to_dataframe(
+                raw, fallback_timestamp=event_date or update_date,
+            )
             if not df.empty:
                 delta_str = ""
                 if event_date:
@@ -187,15 +211,14 @@ def _fetch_event_comments_via_partner_api(
                     delta_str = f", {delta_days:+d}d from update"
                 errors.append(
                     f"[scraper] Event comments: {len(df)} from "
-                    f"'{event_name}' (forum_topic_id={ftid}{delta_str})."
+                    f"'{event_name}' (forum_topic_id={ftid}{delta_str}, live scrape -> cached)."
                 )
                 return df
 
     errors.append(
         f"[scraper] Checked {min(len(sorted_events), 20)} partner events "
-        f"— no comments found."
+        f"-- no comments found."
     )
-    # Fallback to patch note approach
     return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)
 
 
