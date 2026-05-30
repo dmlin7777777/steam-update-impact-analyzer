@@ -220,14 +220,17 @@ def _parse_steam_timestamp(ts: str) -> Optional[datetime]:
 def comments_to_dataframe(
     comments: list[dict],
     fallback_timestamp: "Optional[datetime]" = None,
+    weight: float = 3.0,
 ):
     """
     Convert raw comment dicts to a DataFrame compatible with the review schema.
 
     Columns produced:
         review_id, review_content, voted_up, timestamp,
-        playtime_hours, votes_up, votes_funny, source
+        playtime_hours, votes_up, votes_funny, source, weight
     The `source` column is set to "event_comment" to distinguish from reviews.
+    The `weight` column is used by compute_sentiment_stats to give these
+    comments higher influence than regular reviews in the sentiment average.
 
     Args:
         comments:           Raw comment dicts from fetch_event_comments().
@@ -236,11 +239,14 @@ def comments_to_dataframe(
                             absent in static HTML).  Typically set to the patch
                             note's published_at so comments are treated as
                             post-update data.
+        weight:             Influence multiplier relative to a regular review
+                            (weight=1.0).  Defaults to EVENT_COMMENT_WEIGHT from
+                            config (3.0), meaning 1 comment ≈ 3 reviews.
     """
     import pandas as pd
 
     _COLS = ["review_id", "review_content", "voted_up",
-             "timestamp", "playtime_hours", "votes_up", "votes_funny", "source"]
+             "timestamp", "playtime_hours", "votes_up", "votes_funny", "source", "weight"]
 
     if not comments:
         return pd.DataFrame(columns=_COLS)
@@ -276,6 +282,7 @@ def comments_to_dataframe(
             "votes_up":       c.get("upvotes", 0),
             "votes_funny":    0,
             "source":         "event_comment",
+            "weight":         weight,
         })
 
     if not rows:

@@ -89,17 +89,26 @@ def _merge_event_comments(
         )
         return post_df
 
-    # Add 'source' column to post_df for traceability
+    # Stamp weight=1.0 on regular reviews so both sides have the column
+    post_df = post_df.copy()
+    if "weight" not in post_df.columns:
+        post_df["weight"] = 1.0
     if "source" not in post_df.columns:
-        post_df = post_df.copy()
         post_df["source"] = "review"
 
-    ec_subset = event_df[needed + (["source"] if "source" in event_df.columns else [])].copy()
+    keep_cols = needed + [
+        c for c in ["source", "weight"] if c in event_df.columns
+    ]
+    ec_subset = event_df[keep_cols].copy()
     if "source" not in ec_subset.columns:
         ec_subset["source"] = "event_comment"
+    if "weight" not in ec_subset.columns:
+        ec_subset["weight"] = 1.0   # fallback if old dataframe without weight column
 
+    ec_w = ec_subset["weight"].iloc[0] if not ec_subset.empty else 1.0
     errors.append(
-        f"[analysis] ℹ️  Merged {len(ec_subset)} event comments into post-update window."
+        f"[analysis] Merged {len(ec_subset)} event comments "
+        f"(weight={ec_w:.1f}x) into post-update window."
     )
     return pd.concat([post_df, ec_subset], ignore_index=True)
 

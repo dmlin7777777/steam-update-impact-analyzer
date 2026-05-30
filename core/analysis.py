@@ -34,7 +34,13 @@ _client = anthropic.Anthropic()
 def compute_sentiment_stats(df: pd.DataFrame) -> SentimentStats:
     """
     Aggregate VADER scores into SentimentStats.
-    Requires column: vader_compound, sentiment_label.
+
+    Requires columns: vader_compound, sentiment_label.
+    Optional column:  weight  (float, default 1.0 per row)
+
+    When a `weight` column is present (e.g. event comments carry weight=3.0),
+    all averages and label percentages become weighted so high-signal rows
+    pull the stats more than low-signal ones.
     """
     if df.empty:
         return SentimentStats(
@@ -42,12 +48,19 @@ def compute_sentiment_stats(df: pd.DataFrame) -> SentimentStats:
             neutral_pct=0.0,   negative_pct=0.0, n_reviews=0,
         )
 
-    label_counts = df["sentiment_label"].value_counts(normalize=True)
+    weights = df["weight"] if "weight" in df.columns else pd.Series(1.0, index=df.index)
+    total_w = float(weights.sum())
+
+    mean_compound = float(np.average(df["vader_compound"], weights=weights))
+
+    def _wpct(label: str) -> float:
+        return float(weights[df["sentiment_label"] == label].sum()) / total_w
+
     return SentimentStats(
-        mean_compound=float(df["vader_compound"].mean()),
-        positive_pct= float(label_counts.get("positive", 0.0)),
-        neutral_pct=  float(label_counts.get("neutral",  0.0)),
-        negative_pct= float(label_counts.get("negative", 0.0)),
+        mean_compound=mean_compound,
+        positive_pct= _wpct("positive"),
+        neutral_pct=  _wpct("neutral"),
+        negative_pct= _wpct("negative"),
         n_reviews=    len(df),
     )
 

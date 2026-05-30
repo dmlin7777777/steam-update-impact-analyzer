@@ -53,6 +53,13 @@ TOPIC_LABELS = [
     "other",          # doesn't fit above
 ]
 
+# ── Event comment weighting ───────────────────────────────────────────────────
+# Comments posted directly under an update announcement are the most direct
+# player reaction to that specific update.  They receive a higher weight in
+# sentiment calculations so they pull the compound score more than a general
+# review posted in the same window.
+EVENT_COMMENT_WEIGHT = 3.0   # 1 event comment ≈ 3 regular reviews
+
 # ── Risk scoring rules ────────────────────────────────────────────────────────
 ALERT_THRESHOLDS = {
     "sentiment_drop":         0.15,   # post−pre compound score drop
