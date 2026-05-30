@@ -44,8 +44,7 @@ _HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
-_DELAY = 0.5         # seconds between paginated requests
-_MAX_PAGES = 50      # cap at 50 pages × ~15 comments = ~750 comments
+_DELAY = 0.5   # seconds between paginated requests
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -54,14 +53,14 @@ def fetch_event_comments(
     appid: str,
     news_url: str,
     news_gid: str,
-    max_pages: int = _MAX_PAGES,
 ) -> list[dict]:
     """
-    Fetch player comments posted under a Steam update announcement.
+    Fetch ALL player comments posted under a Steam update announcement.
 
     Strategy:
       1. Follow *news_url* redirect → extract the community event GID.
       2. Try Format A:  /app/{appid}/eventcomments/{event_gid}?ctp=N
+         Paginates until Steam returns an empty page (natural end-of-thread).
       3. If Format A returns 0 comments, also try with *news_gid* as GID.
       4. If nothing works, return [] — caller should proceed without comments.
 
@@ -69,7 +68,6 @@ def fetch_event_comments(
         appid:    Steam App ID string.
         news_url: URL from GetNewsForApp (may redirect to Steam Community).
         news_gid: GID from GetNewsForApp (used as fallback GID).
-        max_pages: Maximum pages to paginate (each ~15 comments).
 
     Returns:
         List of dicts with keys: comment_id, author, timestamp_raw,
@@ -80,11 +78,11 @@ def fetch_event_comments(
     event_gid = _resolve_event_gid(news_url) or news_gid
 
     # Step 2: try the known-working Format A endpoint
-    comments = _scrape_format_a(appid, event_gid, max_pages)
+    comments = _scrape_format_a(appid, event_gid)
 
     # Step 3: if event_gid differed from news_gid and we got nothing, try news_gid
     if not comments and event_gid != news_gid:
-        comments = _scrape_format_a(appid, news_gid, max_pages)
+        comments = _scrape_format_a(appid, news_gid)
 
     return comments
 
@@ -112,19 +110,22 @@ def _resolve_event_gid(news_url: str) -> Optional[str]:
         return None
 
 
-def _scrape_format_a(appid: str, event_gid: str, max_pages: int) -> list[dict]:
+def _scrape_format_a(appid: str, event_gid: str) -> list[dict]:
     """
-    Paginate through /app/{appid}/eventcomments/{event_gid}?ctp=N.
+    Paginate through /app/{appid}/eventcomments/{event_gid}?ctp=N until
+    Steam returns an empty page (natural end-of-thread). No page cap.
     Returns list of parsed comment dicts (may be empty).
     """
     all_comments: list[dict] = []
-    for page in range(1, max_pages + 1):
+    page = 1
+    while True:
         batch = _fetch_comment_page(appid, event_gid, page)
         if not batch:
-            break
+            break                   # empty page → reached end of thread
         all_comments.extend(batch)
-        if len(batch) < 14:  # last page is usually < full size
-            break
+        if len(batch) < 14:
+            break                   # partial page → last page of thread
+        page += 1
         time.sleep(_DELAY)
     return all_comments
 
