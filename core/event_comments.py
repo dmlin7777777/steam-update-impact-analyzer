@@ -51,40 +51,51 @@ _DELAY = 0.5   # seconds between paginated requests
 
 def fetch_event_comments(
     appid: str,
-    news_url: str,
-    news_gid: str,
+    news_url: str = "",
+    news_gid: str = "",
+    forum_topic_id: str = "",
 ) -> list[dict]:
     """
     Fetch ALL player comments posted under a Steam update announcement.
 
-    Strategy:
-      1. Follow *news_url* redirect → extract the community event GID.
-      2. Try Format A:  /app/{appid}/eventcomments/{event_gid}?ctp=N
-         Paginates until Steam returns an empty page (natural end-of-thread).
-      3. If Format A returns 0 comments, also try with *news_gid* as GID.
-      4. If nothing works, return [] — caller should proceed without comments.
+    Strategy (in order of reliability):
+      1. If forum_topic_id is provided, use it directly — this is the GID for
+         /app/{appid}/eventcomments/{forum_topic_id} and works for BOTH old
+         (Format A) and new (Format B) announcement pages.
+      2. Follow *news_url* redirect → extract a GID → try eventcomments.
+      3. Try with *news_gid* as fallback.
 
-    Args:
-        appid:    Steam App ID string.
-        news_url: URL from GetNewsForApp (may redirect to Steam Community).
-        news_gid: GID from GetNewsForApp (used as fallback GID).
+    The forum_topic_id is obtained from Steam's partner events API:
+        GET /events/ajaxgetpartnereventspageable/?appid={appid}
+    Each event object has a 'forum_topic_id' field that maps directly to
+    the eventcomments endpoint.
 
     Returns:
         List of dicts with keys: comment_id, author, timestamp_raw,
         published_at (UTC datetime), content, upvotes.
-        Empty list on any failure or when format is unsupported.
+        Empty list on any failure.
     """
-    # Step 1: resolve the actual community event GID
-    event_gid = _resolve_event_gid(news_url) or news_gid
+    # Preferred: direct forum_topic_id (works for all formats)
+    if forum_topic_id:
+        comments = _scrape_format_a(appid, forum_topic_id)
+        if comments:
+            return comments
 
-    # Step 2: try the known-working Format A endpoint
-    comments = _scrape_format_a(appid, event_gid)
+    # Fallback: resolve from news_url redirect
+    if news_url:
+        event_gid = _resolve_event_gid(news_url)
+        if event_gid:
+            comments = _scrape_format_a(appid, event_gid)
+            if comments:
+                return comments
 
-    # Step 3: if event_gid differed from news_gid and we got nothing, try news_gid
-    if not comments and event_gid != news_gid:
+    # Last resort: try raw news_gid
+    if news_gid:
         comments = _scrape_format_a(appid, news_gid)
+        if comments:
+            return comments
 
-    return comments
+    return []
 
 
 def event_comments_available(appid: str, news_url: str, news_gid: str) -> bool:

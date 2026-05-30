@@ -6,13 +6,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from agents.state import PatchNote, PipelineState, ScraperOutput
 from core.scraper import SteamAPIError, fetch_app_details, fetch_patch_notes, fetch_reviews
 from core.event_comments import fetch_event_comments, comments_to_dataframe
 
 # Reviews older than this many days cannot be reliably fetched from Steam's
 # recent-first API without paging through huge volumes of newer data.
-# Popular games (CS2, Dota 2) may effectively cap out even sooner.
 _HISTORICAL_WARN_DAYS = 30
 
 
@@ -23,15 +24,9 @@ def scraper_node(state: PipelineState) -> dict:
             event_comments, current_step
 
     Data sources (in priority order):
-      1. Local SQLite cache — for historical windows already scraped.
-      2. Live Steam review API — for recent windows (< ~30 days).
-      3. Steam event comments — fetched for the patch note closest to
-         update_date; treated as high-signal post-update data.
-
-    Window boundaries (no overlap / no leakage):
-      pre  : [update_date - pre_days,  update_date)   exclusive right edge
-      post : [update_date,             update_date + post_days]  inclusive
-    Reviews at exactly update_date are counted as post-update only.
+      1. Local SQLite cache / live Steam review API.
+      2. Steam partner events API → forum_topic_id → event comments.
+      3. Patch note URLs as fallback for event comment GID resolution.
     """
     appid       = state["appid"]
     update_date = state["update_date"]
@@ -43,9 +38,7 @@ def scraper_node(state: PipelineState) -> dict:
         info      = fetch_app_details(appid)
         game_name = info["name"]
 
-        # 2. Review windows — 1-second gap prevents boundary overlap
-        #    pre  : [update_date − pre_days,  update_date)   exclusive right edge
-        #    post : [update_date,             update_date + post_days]
+        # 2. Review windows
         now_utc      = datetime.now(timezone.utc)
         days_ago     = (now_utc - update_date).days
         errors: list[str] = []
@@ -57,14 +50,13 @@ def scraper_node(state: PipelineState) -> dict:
         pre_reviews  = fetch_reviews(appid, pre_start, pre_end_excl)
         post_reviews = fetch_reviews(appid, update_date, post_end)
 
-        # 3. Historical-data guard — only warn when data is actually missing
+        # 3. Historical-data guard
         if days_ago > _HISTORICAL_WARN_DAYS:
             if pre_reviews.empty and post_reviews.empty:
                 errors.append(
-                    f"[scraper] ❌  No reviews retrieved for either window. "
-                    f"Update date is {days_ago} days ago and the local cache has no data "
-                    f"for this window.  Run import_cache.py to load historical data, "
-                    f"or try an update from the last {_HISTORICAL_WARN_DAYS} days."
+                    f"[scraper] No reviews retrieved for either window. "
+                    f"Update date is {days_ago} days ago. "
+                    f"Run import_cache.py or use the UI cache initialiser."
                 )
             else:
                 missing = []
@@ -74,30 +66,24 @@ def scraper_node(state: PipelineState) -> dict:
                     missing.append("post-update")
                 if missing:
                     errors.append(
-                        f"[scraper] ⚠️  Update date is {days_ago} days ago. "
-                        f"No {' or '.join(missing)} reviews found in local cache for this window. "
+                        f"[scraper] Update date is {days_ago} days ago. "
+                        f"No {' or '.join(missing)} reviews found. "
                         f"Results may be incomplete."
                     )
 
-        # 4. Patch notes published within the pre_days look-back
+        # 4. Patch notes
         raw_notes   = fetch_patch_notes(appid, since_dt=pre_start)
         patch_notes = [PatchNote(**n) for n in raw_notes]
 
-        # 5. Event comments — fetch from the patch note closest to update_date
-        #    Event comments are anchored to the specific announcement and carry
-        #    higher signal than general reviews for that update.
-        event_comments_df = _fetch_closest_event_comments(
-            appid, patch_notes, update_date, errors
+        # 5. Event comments — primary signal
+        event_comments_df = _fetch_event_comments_via_partner_api(
+            appid, update_date, patch_notes, errors,
         )
 
-        # Validate output shape
         output = ScraperOutput(
-            appid=             appid,
-            game_name=         game_name,
-            n_pre_reviews=     len(pre_reviews),
-            n_post_reviews=    len(post_reviews),
-            n_patch_notes=     len(patch_notes),
-            n_event_comments=  len(event_comments_df),
+            appid=appid, game_name=game_name,
+            n_pre_reviews=len(pre_reviews), n_post_reviews=len(post_reviews),
+            n_patch_notes=len(patch_notes), n_event_comments=len(event_comments_df),
         )
 
         return {
@@ -119,42 +105,128 @@ def scraper_node(state: PipelineState) -> dict:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _fetch_closest_event_comments(
+def _fetch_partner_events(appid: str, max_events: int = 100) -> list[dict]:
+    """
+    Fetch events from Steam's partner events API.
+    Each event contains forum_topic_id — the GID for eventcomments endpoint.
+    This works for BOTH old (Format A) and new (Format B) announcement pages.
+    """
+    events: list[dict] = []
+    for offset in range(0, max_events, 20):
+        try:
+            r = requests.get(
+                "https://store.steampowered.com/events/ajaxgetpartnereventspageable/",
+                params={"appid": appid, "offset": offset, "count": 20, "l": "english"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            batch = r.json().get("events", [])
+            if not batch:
+                break
+            events.extend(batch)
+        except Exception:
+            break
+    return events
+
+
+def _fetch_event_comments_via_partner_api(
+    appid: str,
+    update_date: datetime,
+    patch_notes: list[PatchNote],
+    errors: list[str],
+):
+    """
+    Find the event closest to update_date using Steam's partner events API,
+    extract its forum_topic_id, and fetch comments via the eventcomments endpoint.
+
+    Why partner events API?
+    -----------------------
+    Steam's GetNewsForApp returns news GIDs and URLs, but these do NOT map to
+    the eventcomments endpoint for newer games. The partner events API returns
+    a forum_topic_id field that IS the correct GID for eventcomments — works
+    for both old and new announcement formats.
+    """
+    import pandas as pd
+
+    # Step 1: Get partner events
+    events = _fetch_partner_events(appid)
+    if not events:
+        errors.append("[scraper] Partner events API returned no events.")
+        # Fallback: try patch notes directly
+        return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)
+
+    # Step 2: Sort events by proximity to update_date
+    def _event_distance(e: dict) -> float:
+        ts = e.get("rtime32_start_time", 0)
+        if not ts:
+            return float("inf")
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return abs((dt - update_date).total_seconds())
+
+    sorted_events = sorted(events, key=_event_distance)
+
+    # Step 3: Try each event's forum_topic_id
+    for i, event in enumerate(sorted_events[:20]):  # check up to 20 closest
+        ftid = event.get("forum_topic_id", "")
+        if not ftid:
+            continue
+
+        ts = event.get("rtime32_start_time", 0)
+        event_date = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+        event_name = event.get("event_name", "")
+
+        raw = fetch_event_comments(appid, forum_topic_id=ftid)
+        if raw:
+            # Use the event's own timestamp as fallback for comment timestamps
+            fallback_ts = event_date or update_date
+            df = comments_to_dataframe(raw, fallback_timestamp=fallback_ts)
+            if not df.empty:
+                delta_str = ""
+                if event_date:
+                    delta_days = (event_date - update_date).days
+                    delta_str = f", {delta_days:+d}d from update"
+                errors.append(
+                    f"[scraper] Event comments: {len(df)} from "
+                    f"'{event_name}' (forum_topic_id={ftid}{delta_str})."
+                )
+                return df
+
+    errors.append(
+        f"[scraper] Checked {min(len(sorted_events), 20)} partner events "
+        f"— no comments found."
+    )
+    # Fallback to patch note approach
+    return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)
+
+
+def _fallback_patch_note_comments(
     appid: str,
     patch_notes: list[PatchNote],
     update_date: datetime,
     errors: list[str],
 ):
     """
-    Find the patch note closest to (and not after) update_date + 1 day, then
-    fetch its event comments.  Returns an empty DataFrame on any failure.
+    Legacy fallback: try patch note URLs/GIDs for event comments.
+    Used when partner events API is unavailable.
     """
     import pandas as pd
 
     if not patch_notes:
         return pd.DataFrame()
 
-    # Pick the patch note whose published_at is closest to update_date
-    # (within a ±2-day window to allow for announcement timing)
-    _2d = timedelta(days=2)
-    candidates = [
-        n for n in patch_notes
-        if abs((n.published_at - update_date).total_seconds()) <= _2d.total_seconds()
-    ]
-    if not candidates:
-        # Fallback: just use the most recent patch note
-        candidates = sorted(patch_notes, key=lambda n: n.published_at, reverse=True)
+    sorted_notes = sorted(
+        patch_notes,
+        key=lambda n: abs((n.published_at - update_date).total_seconds()),
+    )
 
-    note = min(candidates, key=lambda n: abs((n.published_at - update_date).total_seconds()))
+    for note in sorted_notes:
+        try:
+            raw = fetch_event_comments(appid, news_url=note.url, news_gid=note.gid)
+            if raw:
+                df = comments_to_dataframe(raw, fallback_timestamp=note.published_at)
+                if not df.empty:
+                    return df
+        except Exception:
+            continue
 
-    try:
-        raw = fetch_event_comments(appid, news_url=note.url, news_gid=note.gid)
-        # Pass the patch note's published_at as fallback timestamp so comments
-        # without a parseable timestamp are still treated as post-update data.
-        df  = comments_to_dataframe(raw, fallback_timestamp=note.published_at)
-        if not df.empty:
-            return df
-        return pd.DataFrame()
-    except Exception as exc:
-        errors.append(f"[scraper] ⚠️  Event comments unavailable: {exc}")
-        return pd.DataFrame()
+    return pd.DataFrame()
