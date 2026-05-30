@@ -10,7 +10,7 @@
 #
 #   2. Event comments:  analysed by core/event_analysis.py (Map-Reduce LLM path).
 #      This module does NOT process event comments — it receives the finished
-#      EventCommentAnalysis result and incorporates it into risk scoring.
+#      EventAnalysisResult and incorporates it into risk scoring.
 #
 # Topic tagging still uses Claude Haiku for reviews (event comment topics come
 # from the Map-Reduce pipeline).
@@ -160,10 +160,6 @@ def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
                 user=numbered,
                 max_tokens=2048,
             )
-            # Strip code fences (DeepSeek sometimes wraps JSON in ```json)
-            import re
-            raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
-            raw = re.sub(r'\n?```\s*$', '', raw)
             parsed: list[str] = json.loads(raw)
             parsed = [lbl if lbl in TOPIC_LABELS else "other" for lbl in parsed]
             if len(parsed) < len(chunk):
@@ -207,19 +203,20 @@ def compute_risk_signals(
     # ── Review-based signals ─────────────────────────────────────────────────
     if review_analysis is not None:
         post = review_analysis.sentiment
-        delta = round(post.mean_compound - pre.mean_compound, 4)
+        # Delta = post negative_pct - pre negative_pct (positive = worsening)
+        neg_delta = round(post.negative_pct - pre.negative_pct, 4)
 
-        # R1 — Sentiment drop (reviews)
+        # R1 — Negative sentiment increase (reviews)
         thresh_drop = ALERT_THRESHOLDS["sentiment_drop"]
-        if delta < -thresh_drop:
+        if neg_delta > thresh_drop:
             signals.append(RiskSignal(
                 rule="R1",
-                severity=_drop_severity(delta),
-                value=round(delta, 4),
-                threshold=-thresh_drop,
+                severity=_drop_severity(neg_delta),
+                value=round(neg_delta, 4),
+                threshold=thresh_drop,
                 description=(
-                    f"Review sentiment dropped {abs(delta):.3f} points "
-                    f"(threshold {thresh_drop})"
+                    f"Negative review ratio increased by {neg_delta:.1%} "
+                    f"(threshold {thresh_drop:.0%})"
                 ),
             ))
 
@@ -289,10 +286,11 @@ def compute_risk_signals(
     return signals
 
 
-def _drop_severity(delta: float) -> str:
-    if delta < -0.40:
+def _drop_severity(neg_delta: float) -> str:
+    """Map negative-pct increase to severity. neg_delta is positive (bigger = worse)."""
+    if neg_delta > 0.40:
         return "CRITICAL"
-    if delta < -0.25:
+    if neg_delta > 0.25:
         return "HIGH"
     return "MEDIUM"
 
@@ -340,9 +338,10 @@ def run_analysis(
         )
 
     # ── Sentiment delta (reviews only — event comments have no compound) ─────
+    # Delta = post negative_pct - pre negative_pct. Positive means worsening.
     delta = 0.0
     if review_result is not None:
-        delta = round(review_result.sentiment.mean_compound - pre_stats.mean_compound, 4)
+        delta = round(review_result.sentiment.negative_pct - pre_stats.negative_pct, 4)
 
     # ── Topic tagging on reviews ─────────────────────────────────────────────
     post_tagged = tag_topics(post_df) if not post_df.empty else post_df
@@ -371,23 +370,10 @@ def run_analysis(
         .sum()
     ) if not post_df.empty and "vader_compound" in post_df.columns else 0
 
-    # ── Convert EventCommentAnalysis dataclass → EventAnalysisResult pydantic
-    event_result: Optional[EventAnalysisResult] = None
-    if event_analysis is not None:
-        event_result = EventAnalysisResult(
-            n_comments=event_analysis.n_comments,
-            positive_pct=event_analysis.positive_pct,
-            negative_pct=event_analysis.negative_pct,
-            neutral_pct=event_analysis.neutral_pct,
-            top_themes=event_analysis.top_themes,
-            representative_quotes=event_analysis.representative_quotes,
-            llm_summary=event_analysis.llm_summary,
-        )
-
     return AnalysisOutput(
         pre_sentiment=   pre_stats,
         review_analysis= review_result,
-        event_analysis=  event_result,
+        event_analysis=  event_analysis,
         sentiment_delta= delta,
         top_topics=      review_topics,
         risk_signals=    signals,

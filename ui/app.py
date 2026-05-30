@@ -206,11 +206,17 @@ def _run_pipeline(appid: str, update_date: datetime) -> None:
                 # Merge chunk into final state
                 final_state.update(chunk.get(node_name, {}))
 
-            errors = final_state.get("errors", [])
-            if errors:
-                # Surface non-fatal warnings
-                for err in errors:
-                    st.warning(err)
+            logs = final_state.get("errors", [])
+            if logs:
+                for msg in logs:
+                    if msg.startswith("ERROR:"):
+                        st.error(msg[6:].strip())
+                    elif msg.startswith("WARN:"):
+                        st.warning(msg[5:].strip())
+                    else:
+                        # INFO or no prefix → caption
+                        text = msg[5:].strip() if msg.startswith("INFO:") else msg
+                        st.caption(f"ℹ️ {text}")
 
             status.update(label="✅ Analysis complete!", state="complete", expanded=False)
             st.session_state["analysis_result"] = final_state

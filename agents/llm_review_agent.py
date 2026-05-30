@@ -53,15 +53,12 @@ def llm_review_node(state: PipelineState) -> dict:
             max_tokens=1024,
             json_mode=True,
         )
-        import re
-        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
-        raw = re.sub(r'\n?```\s*$', '', raw)
         parsed  = json.loads(raw)
         results = parsed.get("results", [])
     except Exception as exc:
         return {
             "current_step": "llm_review_done",
-            "errors":       [f"[llm_review] API call failed: {exc}"],
+            "errors":       [f"ERROR: [llm_review] API call failed: {exc}"],
         }
 
     decisions = []

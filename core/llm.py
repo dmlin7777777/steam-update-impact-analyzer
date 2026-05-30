@@ -3,14 +3,26 @@
 #
 # Supports DeepSeek (OpenAI-compatible) as the default provider.
 # API key resolution: env var DEEPSEEK_API_KEY
+#
+# Rate-limit handling:
+#   429 responses trigger exponential backoff (2s → 4s → 8s, up to 3 retries).
+#   If all retries fail, RateLimitError is raised to the caller.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import time
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from config import LLM_API_BASE, LLM_API_KEY_ENV
+
+log = logging.getLogger(__name__)
+
+_MAX_429_RETRIES = 3
+_BASE_BACKOFF    = 2      # seconds; doubles each retry → 2, 4, 8
 
 _client: OpenAI | None = None
 
@@ -66,5 +78,22 @@ def chat(
     )
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content.strip()
+
+    # L1: exponential backoff on 429
+    for attempt in range(_MAX_429_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(**kwargs)
+            break
+        except RateLimitError:
+            if attempt >= _MAX_429_RETRIES:
+                raise
+            wait = _BASE_BACKOFF * (2 ** attempt)
+            log.warning("429 rate-limited, backing off %ds (attempt %d/%d)",
+                        wait, attempt + 1, _MAX_429_RETRIES)
+            time.sleep(wait)
+
+    text = response.choices[0].message.content.strip()
+    # Strip markdown code fences (DeepSeek wraps JSON in ```json ... ```)
+    text = re.sub(r'^```(?:json|JSON)?\s*\n?', '', text)
+    text = re.sub(r'\n?```\s*$', '', text)
+    return text.strip()

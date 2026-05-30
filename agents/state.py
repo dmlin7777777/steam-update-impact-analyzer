@@ -98,16 +98,24 @@ class LLMReviewOutput(BaseModel):
 
 
 class EventAnalysisResult(BaseModel):
-    """LLM-derived analysis of event comments (Map-Reduce output)."""
+    """LLM-derived analysis of event comments (Map-Reduce output).
+
+    Produced directly by core/event_analysis.analyse_event_comments().
+    Consumed by: core/analysis (risk signals), recommendation_agent, UI pages.
+    """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     n_comments:        int
+    positive_count:    int = 0
+    negative_count:    int = 0
+    neutral_count:     int = 0
     positive_pct:      float
     negative_pct:      float
     neutral_pct:       float
     top_themes:        list[dict]     # [{"label": ..., "count": ...}]
     representative_quotes: list[dict] # [{"text": ..., "sentiment": ...}]
     llm_summary:       str            # qualitative assessment from Reduce step
+    patch_context:     str = ""       # patch notes used as context (truncated)
 
 
 class ReviewAnalysisResult(BaseModel):
@@ -122,7 +130,7 @@ class AnalysisOutput(BaseModel):
     pre_sentiment:    SentimentStats            # baseline (pre-update reviews)
     review_analysis:  Optional[ReviewAnalysisResult] = None  # post-update reviews (VADER path)
     event_analysis:   Optional[EventAnalysisResult]  = None  # event comments (LLM path)
-    sentiment_delta:  float              # review_analysis compound - pre compound
+    sentiment_delta:  float              # post negative_pct - pre negative_pct (positive = worsening)
     top_topics:       list[TopicCount]
     risk_signals:     list[RiskSignal]
     overall_risk:     Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]

@@ -237,10 +237,10 @@ def test_distribution_summary():
 
 
 def test_event_analysis_result_structure():
-    """Unit test: EventCommentAnalysis dataclass fields."""
-    from core.event_analysis import EventCommentAnalysis
+    """Unit test: EventAnalysisResult Pydantic model fields."""
+    from agents.state import EventAnalysisResult
 
-    result = EventCommentAnalysis(
+    result = EventAnalysisResult(
         n_comments=100,
         positive_count=30,
         negative_count=50,

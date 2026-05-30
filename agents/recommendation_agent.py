@@ -61,7 +61,7 @@ def recommendation_node(state: PipelineState) -> dict:
     if analysis is None:
         return {
             "current_step": "done",
-            "errors":       ["[recommendation] no analysis available -- skipping"],
+            "errors":       ["WARN: [recommendation] no analysis available -- skipping"],
         }
 
     pre = analysis.pre_sentiment
@@ -75,7 +75,6 @@ def recommendation_node(state: PipelineState) -> dict:
     # ── Baseline ─────────────────────────────────────────────────────────────
     context_parts += [
         "=== BASELINE (pre-update reviews) ===",
-        f"compound={pre.mean_compound:+.3f}  "
         f"pos={pre.positive_pct:.1%}  neu={pre.neutral_pct:.1%}  neg={pre.negative_pct:.1%}  "
         f"(n={pre.n_reviews})",
         "",
@@ -113,9 +112,8 @@ def recommendation_node(state: PipelineState) -> dict:
         s = ra.sentiment
         context_parts += [
             f"=== GENERAL REVIEWS — SECONDARY ({s.n_reviews} reviews, VADER-scored) ===",
-            f"compound={s.mean_compound:+.3f}  "
             f"pos={s.positive_pct:.1%}  neu={s.neutral_pct:.1%}  neg={s.negative_pct:.1%}",
-            f"Sentiment delta vs baseline: {analysis.sentiment_delta:+.3f}",
+            f"Negative ratio change vs baseline: {analysis.sentiment_delta:+.1%}",
         ]
         if ra.n_disagreements > 0:
             context_parts.append(
@@ -163,15 +161,9 @@ def recommendation_node(state: PipelineState) -> dict:
             model=LLM_MODEL,
             system=_SYSTEM,
             user=context,
-            max_tokens=1500,
+            max_tokens=4096,
+            json_mode=True,
         )
-        # Strip markdown fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
         parsed = json.loads(raw)
         items = [
             RecommendationItem(
@@ -189,7 +181,7 @@ def recommendation_node(state: PipelineState) -> dict:
     except Exception as exc:
         recommendations = Recommendations(
             narrative=f"Analysis complete. Risk level: {analysis.overall_risk}. "
-                      f"Sentiment delta: {analysis.sentiment_delta:+.3f}. "
+                      f"Negative ratio change: {analysis.sentiment_delta:+.1%}. "
                       f"(Report generation failed: {exc})",
             items=[],
         )

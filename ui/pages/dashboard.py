@@ -46,12 +46,13 @@ def render_dashboard(result: dict) -> None:
     st.subheader("Key Metrics")
     c1, c2, c3, c4 = st.columns(4)
 
-    delta_pct = f"{analysis.sentiment_delta:+.3f}"
-    delta_col = "normal" if analysis.sentiment_delta >= 0 else "inverse"
+    delta_pct = f"{analysis.sentiment_delta:+.1%}"
+    # sentiment_delta is post neg% - pre neg%, positive = worsening → inverse color
+    delta_col = "inverse" if analysis.sentiment_delta > 0 else "normal"
 
     c1.metric("Post-update Reviews", f"{post_n:,}",
               delta=f"{post_n - pre.n_reviews:+,} vs baseline")
-    c2.metric("Sentiment Delta (reviews)", delta_pct,
+    c2.metric("Negative Ratio Change", delta_pct,
               delta=delta_pct, delta_color=delta_col)
     c3.metric("Negative % (reviews)", f"{post_neg:.1%}",
               delta=f"{(post_neg - pre.negative_pct):+.1%} vs baseline",

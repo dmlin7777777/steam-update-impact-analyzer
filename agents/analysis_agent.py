@@ -36,11 +36,11 @@ def analysis_node(state: PipelineState) -> dict:
     errors: list[str] = []
 
     if pre_df is None or pre_df.empty:
-        errors.append("[analysis] pre_reviews is empty -- baseline will be zero")
+        errors.append("WARN: [analysis] pre_reviews is empty -- baseline will be zero")
         pre_df = pd.DataFrame()
 
     if post_df is None or post_df.empty:
-        errors.append("[analysis] cleaned_reviews is empty -- nothing to analyse")
+        errors.append("WARN: [analysis] cleaned_reviews is empty -- nothing to analyse")
         post_df = pd.DataFrame()
 
     # ── Feature extraction on reviews ────────────────────────────────────────
@@ -76,7 +76,7 @@ def analysis_node(state: PipelineState) -> dict:
 
         if comment_texts:
             errors.append(
-                f"[analysis] Analysing {len(comment_texts)} announcement comments "
+                f"INFO: [analysis] Analysing {len(comment_texts)} announcement comments "
                 f"via LLM Map-Reduce (primary signal)."
             )
             event_analysis_result = analyse_event_comments(
@@ -84,7 +84,7 @@ def analysis_node(state: PipelineState) -> dict:
             )
             if event_analysis_result:
                 errors.append(
-                    f"[analysis] Announcement sentiment: "
+                    f"INFO: [analysis] Announcement sentiment: "
                     f"{event_analysis_result.positive_pct:.0%} pos / "
                     f"{event_analysis_result.negative_pct:.0%} neg / "
                     f"{event_analysis_result.neutral_pct:.0%} neu "

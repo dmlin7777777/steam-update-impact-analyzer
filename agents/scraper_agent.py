@@ -54,7 +54,7 @@ def scraper_node(state: PipelineState) -> dict:
         if days_ago > _HISTORICAL_WARN_DAYS:
             if pre_reviews.empty and post_reviews.empty:
                 errors.append(
-                    f"[scraper] No reviews retrieved for either window. "
+                    f"WARN: [scraper] No reviews retrieved for either window. "
                     f"Update date is {days_ago} days ago. "
                     f"Run import_cache.py or use the UI cache initialiser."
                 )
@@ -66,7 +66,7 @@ def scraper_node(state: PipelineState) -> dict:
                     missing.append("post-update")
                 if missing:
                     errors.append(
-                        f"[scraper] Update date is {days_ago} days ago. "
+                        f"WARN: [scraper] Update date is {days_ago} days ago. "
                         f"No {' or '.join(missing)} reviews found. "
                         f"Results may be incomplete."
                     )
@@ -98,7 +98,7 @@ def scraper_node(state: PipelineState) -> dict:
 
     except SteamAPIError as exc:
         return {
-            "errors":       [f"[scraper] {exc}"],
+            "errors":       [f"ERROR: [scraper] {exc}"],
             "current_step": "scraper_failed",
         }
 
@@ -154,7 +154,7 @@ def _fetch_event_comments_via_partner_api(
     # Step 1: Get partner events (fast — just metadata, no comments)
     events = _fetch_partner_events(appid)
     if not events:
-        errors.append("[scraper] Partner events API returned no events.")
+        errors.append("WARN: [scraper] Partner events API returned no events.")
         return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)
 
     # Step 2: Sort events by proximity to update_date
@@ -187,7 +187,7 @@ def _fetch_event_comments_via_partner_api(
                 )
                 if not df.empty:
                     errors.append(
-                        f"[scraper] Event comments: {len(df)} from cache "
+                        f"INFO: [scraper] Event comments: {len(df)} from cache "
                         f"'{event_name}' (forum_topic_id={ftid})."
                     )
                     return df
@@ -210,13 +210,13 @@ def _fetch_event_comments_via_partner_api(
                     delta_days = (event_date - update_date).days
                     delta_str = f", {delta_days:+d}d from update"
                 errors.append(
-                    f"[scraper] Event comments: {len(df)} from "
+                    f"INFO: [scraper] Event comments: {len(df)} from "
                     f"'{event_name}' (forum_topic_id={ftid}{delta_str}, live scrape -> cached)."
                 )
                 return df
 
     errors.append(
-        f"[scraper] Checked {min(len(sorted_events), 20)} partner events "
+        f"WARN: [scraper] Checked {min(len(sorted_events), 20)} partner events "
         f"-- no comments found."
     )
     return _fallback_patch_note_comments(appid, patch_notes, update_date, errors)

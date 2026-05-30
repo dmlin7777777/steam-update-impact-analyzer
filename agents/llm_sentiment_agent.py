@@ -54,17 +54,13 @@ def llm_sentiment_node(state: PipelineState) -> dict:
             max_tokens=1024,
             json_mode=True,
         )
-        # Strip markdown code fences if present
-        import re
-        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
-        raw = re.sub(r'\n?```\s*$', '', raw)
         labels = json.loads(raw)
         if not isinstance(labels, list):
             raise ValueError("unexpected response format")
     except Exception as exc:
         return {
             "current_step": "llm_sentiment_done",
-            "errors":       [f"[llm_sentiment] {exc}"],
+            "errors":       [f"ERROR: [llm_sentiment] {exc}"],
         }
 
     valid = {"positive", "neutral", "negative"}
@@ -88,15 +84,23 @@ def llm_sentiment_node(state: PipelineState) -> dict:
         n_reviews=     len(updated_df),
     )
 
-    # Update ONLY review_analysis, preserve event_analysis
+    # Update review_analysis + sentiment_delta, preserve event_analysis
     updated_review = None
+    updated_delta = analysis.sentiment_delta
     if analysis.review_analysis is not None:
         updated_review = analysis.review_analysis.model_copy(
             update={"sentiment": corrected_stats}
         )
+        # Recompute delta: post negative_pct - pre negative_pct
+        updated_delta = round(
+            corrected_stats.negative_pct - analysis.pre_sentiment.negative_pct, 4
+        )
 
     updated_analysis = analysis.model_copy(
-        update={"review_analysis": updated_review}
+        update={
+            "review_analysis": updated_review,
+            "sentiment_delta": updated_delta,
+        }
     )
 
     return {

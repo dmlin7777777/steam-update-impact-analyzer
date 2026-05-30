@@ -101,9 +101,9 @@ class BacktestResult:
     case:          BacktestCase
     pre_n:         int
     post_n:        int
-    pre_compound:  float
-    post_compound: float
-    delta:         float
+    pre_neg_pct:   float
+    post_neg_pct:  float
+    neg_delta:     float       # post neg% - pre neg% (positive = worsening)
     risk:          str
     signals:       list
     data_ok:       bool
@@ -136,23 +136,27 @@ def run_case(case: BacktestCase) -> BacktestResult:
 
     pre_stats  = compute_sentiment_stats(pre_df)
     post_stats = compute_sentiment_stats(post_df)
-    delta      = round(post_stats.mean_compound - pre_stats.mean_compound, 4)
-    signals    = compute_risk_signals(pre_stats, post_stats, delta)
+    neg_delta  = round(post_stats.negative_pct - pre_stats.negative_pct, 4)
+
+    # Build ReviewAnalysisResult for compute_risk_signals
+    from agents.state import ReviewAnalysisResult
+    review_result = ReviewAnalysisResult(sentiment=post_stats)
+    signals    = compute_risk_signals(pre_stats, review_result, event_analysis=None)
     risk       = _overall_risk(signals)
 
     pass_risk  = (risk in case.expected_risk) if data_ok else None
     pass_delta = (
-        (delta < 0 if case.expected_delta == "-" else
-         delta > 0 if case.expected_delta == "+" else True)
+        (neg_delta > 0 if case.expected_delta == "-" else
+         neg_delta < 0 if case.expected_delta == "+" else True)
         if data_ok else None
     )
 
     return BacktestResult(
         case=case,
         pre_n=len(pre_df), post_n=len(post_df),
-        pre_compound=pre_stats.mean_compound,
-        post_compound=post_stats.mean_compound,
-        delta=delta, risk=risk, signals=signals,
+        pre_neg_pct=pre_stats.negative_pct,
+        post_neg_pct=post_stats.negative_pct,
+        neg_delta=neg_delta, risk=risk, signals=signals,
         data_ok=data_ok,
         pass_risk=pass_risk,
         pass_delta=pass_delta,
@@ -186,10 +190,10 @@ def print_result(r: BacktestResult) -> None:
             print(f"  No cache for appid {c.appid} -- run bulk scrape first")
         return
 
-    arrow = "v" if r.delta < 0 else "^"
-    print(f"  Pre-update    n={r.pre_n:>5,}   compound={r.pre_compound:+.4f}")
-    print(f"  Post-update   n={r.post_n:>5,}   compound={r.post_compound:+.4f}")
-    print(f"  Delta                    {r.delta:+.4f}  {arrow}")
+    arrow = "^" if r.neg_delta > 0 else "v"
+    print(f"  Pre-update    n={r.pre_n:>5,}   neg%={r.pre_neg_pct:.1%}")
+    print(f"  Post-update   n={r.post_n:>5,}   neg%={r.post_neg_pct:.1%}")
+    print(f"  Neg delta                {r.neg_delta:+.1%}  {arrow}")
     print(f"  Risk level    {r.risk}")
     if r.signals:
         for sig in r.signals:

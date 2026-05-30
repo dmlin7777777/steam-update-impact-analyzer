@@ -25,17 +25,57 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from agents.state import EventAnalysisResult
 from config import LLM_MODEL, LLM_MODEL_LIGHT
 from core.llm import chat as llm_chat
 
+log = logging.getLogger(__name__)
+
 CHUNK_SIZE = 50   # comments per Map call (DeepSeek V4 Flash is reliable at 50,
                    # starts returning empty above ~70 with real-world comment lengths)
+
+# ── Comment pre-filtering ────────────────────────────────────────────────────
+# Light-weight rules to remove zero-signal comments BEFORE Map-Reduce.
+# Goal: reduce API call volume without information loss.
+
+_STEAM_PLACEHOLDER_RE = re.compile(
+    r"^This comment is awaiting analysis", re.IGNORECASE
+)
+_MIN_CHAR_LEN = 5   # "gg", "L", "W", "+1" carry no analysable signal
+
+
+def _prefilter_comments(raw: list[str]) -> tuple[list[str], int]:
+    """
+    Remove noise comments before Map-Reduce.
+
+    Filters:
+      - Shorter than _MIN_CHAR_LEN chars
+      - Steam auto-moderation placeholder text
+      - Exact duplicates (keep first occurrence)
+
+    Returns:
+        (filtered_comments, n_removed)
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for c in raw:
+        stripped = c.strip()
+        if len(stripped) < _MIN_CHAR_LEN:
+            continue
+        if _STEAM_PLACEHOLDER_RE.match(stripped):
+            continue
+        if stripped in seen:
+            continue
+        seen.add(stripped)
+        kept.append(stripped)
+    return kept, len(raw) - len(kept)
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -49,22 +89,6 @@ class ChunkAnalysis:
     themes:      list[dict] = field(default_factory=list)   # [{"label": ..., "count": ...}]
     quotes:      list[dict] = field(default_factory=list)   # [{"text": ..., "sentiment": ...}]
     total:       int = 0
-
-
-@dataclass
-class EventCommentAnalysis:
-    """Final output of the full Map-Reduce pipeline."""
-    n_comments:        int
-    positive_count:    int
-    negative_count:    int
-    neutral_count:     int
-    positive_pct:      float
-    negative_pct:      float
-    neutral_pct:       float
-    top_themes:        list[dict]    # [{"label": ..., "count": ...}], sorted desc
-    representative_quotes: list[dict]
-    llm_summary:       str           # qualitative assessment from Reduce step
-    patch_context:     str           # patch notes used as context
 
 
 # ── Map phase ────────────────────────────────────────────────────────────────
@@ -86,13 +110,8 @@ Rules:
 - Return ONLY the JSON object, no other text."""
 
 
-def _strip_code_fence(raw: str) -> str:
-    """Strip markdown code fences (```, ```json, etc.) from LLM output."""
-    # Remove opening fence: ```json, ```JSON, ```, etc.
-    raw = re.sub(r'^```(?:json|JSON)?\s*\n?', '', raw.strip())
-    # Remove closing fence
-    raw = re.sub(r'\n?```\s*$', '', raw)
-    return raw.strip()
+class _RateLimitHit(Exception):
+    """Raised when a Map call exhausts 429 retries. Used for L2 detection."""
 
 
 def _map_chunk(
@@ -100,7 +119,14 @@ def _map_chunk(
     patch_context: str,
     max_retries: int = 3,
 ) -> ChunkAnalysis:
-    """Run one Map call on a chunk of comments with retry on parse failure."""
+    """Run one Map call on a chunk of comments with retry on parse failure.
+
+    Raises _RateLimitHit if the underlying LLM call raises RateLimitError
+    after its own backoff retries are exhausted — signals the caller to
+    downgrade parallelism (L2).
+    """
+    from openai import RateLimitError
+
     numbered = "\n".join(f"[{i+1}] {c}" for i, c in enumerate(comments))
 
     user_msg = f"""Update context (from patch notes):
@@ -125,7 +151,6 @@ def _map_chunk(
                     continue
                 return ChunkAnalysis(total=len(comments))
 
-            raw = _strip_code_fence(raw)
             d = json.loads(raw)
             sent = d.get("sentiment", {})
             return ChunkAnalysis(
@@ -136,6 +161,8 @@ def _map_chunk(
                 quotes=d.get("quotes", []),
                 total=len(comments),
             )
+        except RateLimitError:
+            raise _RateLimitHit()
         except Exception:
             if attempt < max_retries - 1:
                 time.sleep(2)
@@ -243,7 +270,7 @@ Neutral:  {aggregated['neutral']} ({neu_pct:.1f}%)
             model=LLM_MODEL,
             system=_REDUCE_SYSTEM,
             user=user_msg,
-            max_tokens=600,
+            max_tokens=1200,
         )
     except Exception as exc:
         return (
@@ -254,7 +281,7 @@ Neutral:  {aggregated['neutral']} ({neu_pct:.1f}%)
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-_MAX_WORKERS = 5   # parallel Map calls
+_MAX_WORKERS = 5   # parallel Map calls (L2 may reduce to 1)
 
 
 def analyse_event_comments(
@@ -262,53 +289,112 @@ def analyse_event_comments(
     patch_notes_text: str,
     chunk_size: int = CHUNK_SIZE,
     max_workers: int = _MAX_WORKERS,
-) -> Optional[EventCommentAnalysis]:
+) -> Optional[EventAnalysisResult]:
     """
     Full Map-Reduce analysis of event comments.
 
-    Map phase runs in parallel (up to max_workers threads) to handle
-    large comment volumes (1000+ comments) without excessive wall-clock time.
+    Pipeline:
+      1. Pre-filter: remove noise (short, placeholder, duplicate) comments.
+      2. Map (parallel): chunk → LLM → structured JSON per chunk.
+      3. Aggregate: merge all chunk outputs.
+      4. Reduce: one LLM call to synthesize qualitative assessment.
 
-    Args:
-        comments:         List of raw comment strings (no preprocessing).
-        patch_notes_text: Patch notes for context (what the update changed).
-        chunk_size:       Comments per Map call (default 50).
-        max_workers:      Max parallel Map calls (default 5).
+    Degradation cascade on rate-limiting:
+      L1 (in core/llm.py): exponential backoff 2s→4s→8s per 429.
+      L2: if ≥2 chunks hit 429, drop max_workers to 1 (serial) for remaining.
+      L3: if a chunk fails all retries, skip it. Final result reports coverage.
 
     Returns:
-        EventCommentAnalysis with sentiment counts, themes, quotes,
-        and a qualitative LLM summary. None if no comments provided.
+        EventAnalysisResult, or None if no comments provided.
     """
     if not comments:
         return None
 
-    # ── Map (parallel) ────────────────────────────────────────────────────────
+    # ── Pre-filter ────────────────────────────────────────────────────────────
+    filtered, n_removed = _prefilter_comments(comments)
+    if n_removed > 0:
+        log.info("Pre-filter: %d → %d comments (%d removed)",
+                 len(comments), len(filtered), n_removed)
+    if not filtered:
+        return None
+
+    # ── Map (parallel, with L2 degradation) ──────────────────────────────────
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     batches = [
-        comments[i : i + chunk_size]
-        for i in range(0, len(comments), chunk_size)
+        filtered[i : i + chunk_size]
+        for i in range(0, len(filtered), chunk_size)
     ]
+    total_batches = len(batches)
 
-    chunks: list[ChunkAnalysis] = [ChunkAnalysis()] * len(batches)  # placeholder
+    chunks: list[Optional[ChunkAnalysis]] = [None] * total_batches
+    n_rate_limited = 0
+    n_failed = 0
+    current_workers = max_workers
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_idx = {
-            pool.submit(_map_chunk, batch, patch_notes_text): idx
-            for idx, batch in enumerate(batches)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            chunks[idx] = future.result()
+    # Process in waves — allows L2 to kick in mid-execution
+    pending_indices = list(range(total_batches))
+
+    while pending_indices:
+        wave_indices = pending_indices
+        pending_indices = []
+
+        with ThreadPoolExecutor(max_workers=current_workers) as pool:
+            future_to_idx = {
+                pool.submit(_map_chunk, batches[idx], patch_notes_text): idx
+                for idx in wave_indices
+            }
+            rate_limited_this_wave: list[int] = []
+
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    chunks[idx] = future.result()
+                except _RateLimitHit:
+                    n_rate_limited += 1
+                    rate_limited_this_wave.append(idx)
+                except Exception:
+                    n_failed += 1
+                    chunks[idx] = ChunkAnalysis(total=len(batches[idx]))
+
+        # L2: if ≥2 rate-limited in this wave, drop to serial
+        if len(rate_limited_this_wave) >= 2 and current_workers > 1:
+            current_workers = 1
+            log.warning("L2: %d chunks rate-limited, dropping to serial",
+                        len(rate_limited_this_wave))
+
+        # Re-queue rate-limited chunks for retry in next wave
+        if rate_limited_this_wave:
+            pending_indices = rate_limited_this_wave
+            time.sleep(5)  # cool-down before retry wave
+
+    # L3: fill any still-None chunks with empty placeholders
+    for i in range(total_batches):
+        if chunks[i] is None:
+            n_failed += 1
+            chunks[i] = ChunkAnalysis(total=len(batches[i]))
+
+    valid_chunks: list[ChunkAnalysis] = [c for c in chunks if c is not None]
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
-    agg = _aggregate_chunks(chunks)
+    agg = _aggregate_chunks(valid_chunks)
+
+    # ── Coverage annotation ───────────────────────────────────────────────────
+    analysed = sum(1 for c in valid_chunks if c.positive + c.negative + c.neutral > 0)
+    coverage_note = ""
+    if n_failed > 0 or n_rate_limited > 0:
+        coverage_note = (
+            f" [coverage: {analysed}/{total_batches} chunks analysed"
+            f", {n_failed} failed, {n_rate_limited} rate-limited]"
+        )
+        log.warning("Map coverage: %d/%d chunks, %d failed, %d rate-limited",
+                     analysed, total_batches, n_failed, n_rate_limited)
 
     # ── Reduce ────────────────────────────────────────────────────────────────
-    summary = _reduce(agg, patch_notes_text)
+    summary = _reduce(agg, patch_notes_text) + coverage_note
 
     total = agg["n_comments"]
-    return EventCommentAnalysis(
+    return EventAnalysisResult(
         n_comments=total,
         positive_count=agg["positive"],
         negative_count=agg["negative"],

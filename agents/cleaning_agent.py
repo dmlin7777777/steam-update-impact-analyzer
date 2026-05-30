@@ -23,7 +23,7 @@ def cleaning_node(state: PipelineState) -> dict:
             "cleaned_reviews": df,
             "flagged_reviews": None,
             "current_step":   "cleaning_done",
-            "errors":         ["[cleaning] post_reviews is empty — nothing to clean"],
+            "errors":         ["WARN: [cleaning] post_reviews is empty — nothing to clean"],
         }
 
     cleaned, flagged = run_cleaning(df)
@@ -45,7 +45,7 @@ def cleaning_node(state: PipelineState) -> dict:
         "flagged_reviews": flagged,
         "current_step":   "cleaning_done",
         # Surface summary in errors list only on warning-level issues
-        **({"errors": [f"[cleaning] {output.n_flagged} rows flagged ({output.flagged_ratio:.1%})"]}
+        **({"errors": [f"INFO: [cleaning] {output.n_flagged} rows flagged ({output.flagged_ratio:.1%})"]}
            if output.n_flagged > 0 else {}),
     }
 
