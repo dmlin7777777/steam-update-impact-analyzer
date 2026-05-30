@@ -67,17 +67,37 @@ def recommendation_node(state: PipelineState) -> dict:
     # Build context string for Claude
     pre  = analysis.pre_sentiment
     post = analysis.post_sentiment
+    ec   = analysis.event_comment_sentiment
+    rev  = analysis.review_sentiment
 
     context_parts = [
         f"Game: {game_name}",
         "",
         "=== SENTIMENT COMPARISON ===",
-        f"Pre-update  : compound={pre.mean_compound:+.3f}  "
+        f"Pre-update (reviews)  : compound={pre.mean_compound:+.3f}  "
         f"pos={pre.positive_pct:.1%}  neu={pre.neutral_pct:.1%}  neg={pre.negative_pct:.1%}  "
         f"(n={pre.n_reviews})",
-        f"Post-update : compound={post.mean_compound:+.3f}  "
-        f"pos={post.positive_pct:.1%}  neu={post.neutral_pct:.1%}  neg={post.negative_pct:.1%}  "
-        f"(n={post.n_reviews})",
+    ]
+
+    # Show event comments and reviews separately when both are available
+    if ec is not None and rev is not None:
+        context_parts += [
+            f"Post-update BLENDED   : compound={post.mean_compound:+.3f}  "
+            f"pos={post.positive_pct:.1%}  neu={post.neutral_pct:.1%}  neg={post.negative_pct:.1%}  "
+            f"(event 70% + reviews 30%)",
+            f"  Announcement comments: compound={ec.mean_compound:+.3f}  "
+            f"pos={ec.positive_pct:.1%}  neg={ec.negative_pct:.1%}  (n={ec.n_reviews}, PRIMARY)",
+            f"  General reviews      : compound={rev.mean_compound:+.3f}  "
+            f"pos={rev.positive_pct:.1%}  neg={rev.negative_pct:.1%}  (n={rev.n_reviews}, secondary)",
+        ]
+    else:
+        context_parts.append(
+            f"Post-update (reviews) : compound={post.mean_compound:+.3f}  "
+            f"pos={post.positive_pct:.1%}  neu={post.neutral_pct:.1%}  neg={post.negative_pct:.1%}  "
+            f"(n={post.n_reviews})"
+        )
+
+    context_parts += [
         f"Delta       : {analysis.sentiment_delta:+.3f}",
         f"Overall risk: {analysis.overall_risk}",
         "",

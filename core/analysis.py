@@ -21,6 +21,7 @@ from agents.state import (
 )
 from config import (
     ALERT_THRESHOLDS,
+    EVENT_BLEND_RATIO,
     LLM_MODEL_LIGHT,
     TOPIC_LABELS,
     VADER_GRAY_LO,
@@ -62,6 +63,40 @@ def compute_sentiment_stats(df: pd.DataFrame) -> SentimentStats:
         neutral_pct=  _wpct("neutral"),
         negative_pct= _wpct("negative"),
         n_reviews=    len(df),
+    )
+
+
+def blend_sentiment_stats(
+    event_stats:  SentimentStats,
+    review_stats: SentimentStats,
+    event_ratio:  float = EVENT_BLEND_RATIO,
+) -> SentimentStats:
+    """
+    Blend event-comment sentiment (primary) with review sentiment (secondary)
+    using a fixed ratio that is independent of raw row counts.
+
+    With event_ratio=0.70:
+      - Event comments always contribute 70% of the final score
+      - Reviews contribute the remaining 30%
+      - 500 event comments vs 5000 reviews → event comments still 70%
+
+    Falls back gracefully:
+      - No event comments → 100% reviews
+      - No reviews        → 100% event comments
+    """
+    if event_stats.n_reviews == 0:
+        return review_stats
+    if review_stats.n_reviews == 0:
+        return event_stats
+
+    r = event_ratio
+    s = 1.0 - r
+    return SentimentStats(
+        mean_compound=round(r * event_stats.mean_compound + s * review_stats.mean_compound, 4),
+        positive_pct= round(r * event_stats.positive_pct  + s * review_stats.positive_pct,  4),
+        neutral_pct=  round(r * event_stats.neutral_pct   + s * review_stats.neutral_pct,   4),
+        negative_pct= round(r * event_stats.negative_pct  + s * review_stats.negative_pct,  4),
+        n_reviews=event_stats.n_reviews + review_stats.n_reviews,
     )
 
 
@@ -232,42 +267,80 @@ def compute_rolling_zscore(
 # ── Orchestrating entry point ─────────────────────────────────────────────────
 
 def run_analysis(
-    pre_df:  pd.DataFrame,
-    post_df: pd.DataFrame,
+    pre_df:   pd.DataFrame,
+    post_df:  pd.DataFrame,
+    event_df: Optional[pd.DataFrame] = None,
 ) -> AnalysisOutput:
     """
     Full analysis pipeline for one update event.
 
-    Both DataFrames must already have feature columns from core/features.py.
-    Topic tagging (Claude) is applied to post_df only.
+    Data sources
+    ------------
+    pre_df   : reviews from the pre-update window (baseline).
+    post_df  : reviews from the post-update window (supplementary).
+    event_df : comments posted directly under the update announcement (primary).
 
-    Returns an AnalysisOutput Pydantic model.
+    Sentiment blending
+    ------------------
+    When event_df is available, post_sentiment is a fixed-ratio blend:
+        post_sentiment = EVENT_BLEND_RATIO  × event_comment_sentiment
+                       + (1 − EVENT_BLEND_RATIO) × review_sentiment
+
+    This means event comments always dominate regardless of raw counts
+    (e.g. 500 event comments vs 5000 reviews → event comments still 70%).
+    When no event comments are available, falls back to 100% reviews.
+
+    Topic tagging uses all post-update data (reviews + event comments combined).
     """
-    pre_stats  = compute_sentiment_stats(pre_df)
-    post_stats = compute_sentiment_stats(post_df)
-    delta      = round(post_stats.mean_compound - pre_stats.mean_compound, 4)
+    from core.features import extract_features
 
-    # Topic tagging on post-update reviews
-    post_tagged = tag_topics(post_df) if not post_df.empty else post_df
+    # ── Feature extraction for event_df if needed ────────────────────────────
+    if event_df is not None and not event_df.empty:
+        if "vader_compound" not in event_df.columns:
+            event_df = extract_features(event_df)
+
+    # ── Compute raw sentiment for each source independently ───────────────────
+    pre_stats    = compute_sentiment_stats(pre_df)
+    review_stats = compute_sentiment_stats(post_df)
+    event_stats  = compute_sentiment_stats(event_df) \
+                   if event_df is not None and not event_df.empty else None
+
+    # ── Blend: event comments primary, reviews secondary ─────────────────────
+    if event_stats is not None:
+        post_stats = blend_sentiment_stats(event_stats, review_stats)
+    else:
+        post_stats = review_stats
+
+    delta = round(post_stats.mean_compound - pre_stats.mean_compound, 4)
+
+    # ── Topic tagging on all post-update data (reviews + event comments) ─────
+    all_post_df = pd.concat(
+        [df for df in [post_df, event_df] if df is not None and not df.empty],
+        ignore_index=True,
+    ) if event_df is not None and not event_df.empty else post_df
+
+    post_tagged = tag_topics(all_post_df) if not all_post_df.empty else all_post_df
     top_topics  = aggregate_topics(post_tagged)
 
-    # Risk signals
+    # ── Risk signals (based on blended post sentiment) ────────────────────────
     signals      = compute_risk_signals(pre_stats, post_stats, delta)
     overall_risk = _overall_risk(signals)
 
-    # Count ambiguous reviews that warrant LLM re-score
+    # ── Gray-zone count for LLM re-score (all post-update rows) ──────────────
     gray_zone_count = int(
-        post_df["vader_compound"]
+        all_post_df["vader_compound"]
         .between(-VADER_GRAY_LO, VADER_GRAY_LO)
         .sum()
-    ) if not post_df.empty else 0
+    ) if not all_post_df.empty and "vader_compound" in all_post_df.columns else 0
 
     return AnalysisOutput(
-        pre_sentiment=   pre_stats,
-        post_sentiment=  post_stats,
-        sentiment_delta= delta,
-        top_topics=      top_topics,
-        risk_signals=    signals,
-        overall_risk=    overall_risk,
+        pre_sentiment=           pre_stats,
+        post_sentiment=          post_stats,
+        event_comment_sentiment= event_stats,
+        review_sentiment=        review_stats if event_stats is not None else None,
+        sentiment_delta=         delta,
+        top_topics=              top_topics,
+        risk_signals=            signals,
+        overall_risk=            overall_risk,
         gray_zone_count= gray_zone_count,
     )

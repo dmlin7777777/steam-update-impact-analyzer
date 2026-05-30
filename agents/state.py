@@ -98,8 +98,10 @@ class LLMReviewOutput(BaseModel):
 
 
 class AnalysisOutput(BaseModel):
-    pre_sentiment:   SentimentStats
-    post_sentiment:  SentimentStats
+    pre_sentiment:           SentimentStats
+    post_sentiment:          SentimentStats   # blended: event comments (primary) + reviews (secondary)
+    event_comment_sentiment: Optional[SentimentStats] = None  # event comments alone, for transparency
+    review_sentiment:        Optional[SentimentStats] = None  # reviews alone, for transparency
     sentiment_delta: float              # post.mean_compound − pre.mean_compound
     top_topics:      list[TopicCount]
     risk_signals:    list[RiskSignal]

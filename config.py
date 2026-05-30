@@ -53,12 +53,20 @@ TOPIC_LABELS = [
     "other",          # doesn't fit above
 ]
 
-# ── Event comment weighting ───────────────────────────────────────────────────
-# Comments posted directly under an update announcement are the most direct
-# player reaction to that specific update.  They receive a higher weight in
-# sentiment calculations so they pull the compound score more than a general
-# review posted in the same window.
-EVENT_COMMENT_WEIGHT = 3.0   # 1 event comment ≈ 3 regular reviews
+# ── Event comment blending ────────────────────────────────────────────────────
+# Comments posted directly under an update announcement are the primary signal.
+# General reviews from the nearby window are supplementary context.
+#
+# Blending strategy (fixed ratio, not per-row weight):
+#   post_sentiment = EVENT_BLEND_RATIO  × event_comment_sentiment
+#                  + (1 - EVENT_BLEND_RATIO) × review_sentiment
+#
+# Using a fixed ratio means event comments ALWAYS dominate regardless of raw
+# counts — e.g. 500 event comments vs 5000 reviews still gives event comments
+# 70% of the influence.  When no event comments are available, falls back to
+# 100% reviews.
+EVENT_COMMENT_WEIGHT = 3.0   # kept for DataFrame column; no longer used in stats
+EVENT_BLEND_RATIO    = 0.70  # event comments → 70%, reviews → 30%
 
 # ── Risk scoring rules ────────────────────────────────────────────────────────
 ALERT_THRESHOLDS = {
