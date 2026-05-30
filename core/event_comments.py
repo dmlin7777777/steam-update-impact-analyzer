@@ -45,7 +45,7 @@ _HEADERS = {
     )
 }
 _DELAY = 0.5         # seconds between paginated requests
-_MAX_PAGES = 20      # cap at 20 pages × ~15 comments = ~300 comments
+_MAX_PAGES = 50      # cap at 50 pages × ~15 comments = ~750 comments
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
