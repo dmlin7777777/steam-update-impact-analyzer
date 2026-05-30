@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
 from agents.state import PipelineState, ReviewAnalysisResult, SentimentStats
+from core.llm import chat as llm_chat
 from config import LLM_MODEL_LIGHT, VADER_GRAY_LO
-
-_client = anthropic.Anthropic()
 
 _SYSTEM = (
     "You are a sentiment analyser for Steam game reviews. "
@@ -50,14 +47,12 @@ def llm_sentiment_node(state: PipelineState) -> dict:
     )
 
     try:
-        msg = _client.messages.create(
+        raw = llm_chat(
             model=LLM_MODEL_LIGHT,
+            system=_SYSTEM,
+            user=numbered,
             max_tokens=256,
-            system=[{"type": "text", "text": _SYSTEM,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": numbered}],
         )
-        raw    = msg.content[0].text.strip()
         labels = json.loads(raw)
         if not isinstance(labels, list):
             raise ValueError("unexpected response format")

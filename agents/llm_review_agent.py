@@ -5,13 +5,10 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
 from agents.state import LLMReviewOutput, PipelineState, ReviewDecision
 from core.features import extract_features
+from core.llm import chat as llm_chat
 from config import LLM_MODEL_LIGHT
-
-_client = anthropic.Anthropic()
 
 _SYSTEM = """You are a Steam review data-quality auditor.
 You receive a numbered list of reviews that were flagged as suspicious by automated rules
@@ -49,14 +46,12 @@ def llm_review_node(state: PipelineState) -> dict:
     )
 
     try:
-        msg = _client.messages.create(
+        raw = llm_chat(
             model=LLM_MODEL_LIGHT,
+            system=_SYSTEM,
+            user=f"Review the following:\n{numbered}",
             max_tokens=1024,
-            system=[{"type": "text", "text": _SYSTEM,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": f"Review the following:\n{numbered}"}],
         )
-        raw     = msg.content[0].text.strip()
         parsed  = json.loads(raw)
         results = parsed.get("results", [])
     except Exception as exc:

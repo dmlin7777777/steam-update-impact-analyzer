@@ -6,16 +6,13 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
 from agents.state import (
     PipelineState,
     Recommendations,
     RecommendationItem,
 )
+from core.llm import chat as llm_chat
 from config import LLM_MODEL
-
-_client = anthropic.Anthropic()
 
 _SYSTEM = """You are a senior game analytics consultant specialising in post-update player sentiment.
 
@@ -162,14 +159,12 @@ def recommendation_node(state: PipelineState) -> dict:
     context = "\n".join(context_parts)
 
     try:
-        msg = _client.messages.create(
+        raw = llm_chat(
             model=LLM_MODEL,
+            system=_SYSTEM,
+            user=context,
             max_tokens=1500,
-            system=[{"type": "text", "text": _SYSTEM,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": context}],
         )
-        raw    = msg.content[0].text.strip()
         # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]

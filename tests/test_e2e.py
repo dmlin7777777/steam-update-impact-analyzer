@@ -94,17 +94,12 @@ _FAKE_LLM_RECO = json.dumps({
 
 @patch("agents.scraper_agent.fetch_event_comments")
 @patch("core.scraper.requests.get")
-@patch("anthropic.Anthropic")
-def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get, mock_fetch_ec):
-    """Full graph smoke test with mocked Steam API and Anthropic API."""
+@patch("core.llm.get_client")
+def test_pipeline_runs_end_to_end(mock_get_client, mock_get, mock_fetch_ec):
+    """Full graph smoke test with mocked Steam API and LLM API."""
     from graph import app
 
     # --- Mock Steam API -------------------------------------------------
-    # NOTE: Do NOT also patch core.event_comments.requests.get here.
-    # Both core.scraper and core.event_comments import the same 'requests'
-    # module object, so a second patch on requests.get would overwrite the
-    # first, causing _get() to use the wrong mock.  We mock fetch_event_comments
-    # at the function level instead to avoid the conflict.
     def fake_get(url, params=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
@@ -120,30 +115,24 @@ def test_pipeline_runs_end_to_end(mock_anthropic_cls, mock_get, mock_fetch_ec):
     # Return zero event comments (graceful empty-list path)
     mock_fetch_ec.return_value = []
 
-    # --- Mock Anthropic client ------------------------------------------
-    def _make_content(text):
-        content_block = MagicMock()
-        content_block.text = text
-        return [content_block]
-
+    # --- Mock LLM client (OpenAI-compatible) ----------------------------
     mock_client = MagicMock()
-    mock_anthropic_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     call_count = [0]
     def fake_create(**kwargs):
-        msg = MagicMock()
+        resp = MagicMock()
         n = call_count[0]
         call_count[0] += 1
-        # Route by expected output shape
         if n == 0:
-            msg.content = _make_content(_FAKE_LLM_REVIEW)   # llm_review
+            resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_REVIEW))]
         elif n == 1:
-            msg.content = _make_content(_FAKE_LLM_TOPICS)   # topic tagging
+            resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_TOPICS))]
         else:
-            msg.content = _make_content(_FAKE_LLM_RECO)     # recommendation
-        return msg
+            resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_RECO))]
+        return resp
 
-    mock_client.messages.create.side_effect = fake_create
+    mock_client.chat.completions.create.side_effect = fake_create
 
     # --- Run graph ------------------------------------------------------
     initial: PipelineState = {

@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-import anthropic
 import numpy as np
 import pandas as pd
 
@@ -38,8 +37,7 @@ from config import (
     TOPIC_LABELS,
     VADER_GRAY_LO,
 )
-
-_client = anthropic.Anthropic()
+from core.llm import chat as llm_chat
 
 
 # ── Sentiment aggregation (reviews only — event comments use LLM path) ───────
@@ -156,14 +154,12 @@ def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
         numbered = "\n".join(f"[{j}] {t[:300]}" for j, t in enumerate(chunk))
 
         try:
-            msg = _client.messages.create(
+            raw = llm_chat(
                 model=LLM_MODEL_LIGHT,
+                system=_TOPIC_SYSTEM,
+                user=numbered,
                 max_tokens=512,
-                system=[{"type": "text", "text": _TOPIC_SYSTEM,
-                         "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": numbered}],
             )
-            raw = msg.content[0].text.strip()
             parsed: list[str] = json.loads(raw)
             parsed = [lbl if lbl in TOPIC_LABELS else "other" for lbl in parsed]
             if len(parsed) < len(chunk):

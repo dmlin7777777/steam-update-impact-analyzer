@@ -29,11 +29,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-import anthropic
-
 from config import LLM_MODEL, LLM_MODEL_LIGHT
-
-_client = anthropic.Anthropic()
+from core.llm import chat as llm_chat
 
 CHUNK_SIZE = 100  # comments per Map call
 
@@ -101,14 +98,12 @@ def _map_chunk(
 {numbered}"""
 
     try:
-        msg = _client.messages.create(
+        raw = llm_chat(
             model=LLM_MODEL_LIGHT,
+            system=_MAP_SYSTEM,
+            user=user_msg,
             max_tokens=1024,
-            system=[{"type": "text", "text": _MAP_SYSTEM,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_msg}],
         )
-        raw = msg.content[0].text.strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
@@ -227,14 +222,12 @@ Neutral:  {aggregated['neutral']} ({neu_pct:.1f}%)
 {quotes_str}"""
 
     try:
-        msg = _client.messages.create(
+        return llm_chat(
             model=LLM_MODEL,
+            system=_REDUCE_SYSTEM,
+            user=user_msg,
             max_tokens=600,
-            system=[{"type": "text", "text": _REDUCE_SYSTEM,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_msg}],
         )
-        return msg.content[0].text.strip()
     except Exception as exc:
         return (
             f"Reduce failed ({exc}). Raw stats: {total} comments, "
