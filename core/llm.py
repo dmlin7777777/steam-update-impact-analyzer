@@ -2,7 +2,7 @@
 # Centralised LLM client — all API calls go through here.
 #
 # Supports DeepSeek (OpenAI-compatible) as the default provider.
-# API key resolution: env var DEEPSEEK_API_KEY → config.LLM_API_KEY_FALLBACK
+# API key resolution: env var DEEPSEEK_API_KEY
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def chat(
     in one place.
 
     Args:
-        model:      Model identifier (e.g. "deepseek-v4-pro").
+        model:      Model identifier (e.g. "deepseek-chat").
         system:     System prompt text.
         user:       User message text.
         max_tokens: Maximum tokens in the response.

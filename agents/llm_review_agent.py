@@ -1,5 +1,5 @@
 # agents/llm_review_agent.py
-# LangGraph node: Claude haiku reviews flagged rows and decides keep/remove/uncertain.
+# LangGraph node: LLM reviews flagged rows and decides keep/remove/uncertain.
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def llm_review_node(state: PipelineState) -> dict:
     Reads:  flagged_reviews, cleaned_reviews
     Writes: cleaned_reviews (merged with kept rows), llm_review_log, current_step
 
-    Sends up to 50 flagged reviews to Claude haiku; merges "keep" rows back
+    Sends up to 50 flagged reviews to LLM; merges "keep" rows back
     into cleaned_reviews and runs feature extraction on them.
     """
     flagged = state.get("flagged_reviews")
@@ -51,7 +51,11 @@ def llm_review_node(state: PipelineState) -> dict:
             system=_SYSTEM,
             user=f"Review the following:\n{numbered}",
             max_tokens=1024,
+            json_mode=True,
         )
+        import re
+        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
+        raw = re.sub(r'\n?```\s*$', '', raw)
         parsed  = json.loads(raw)
         results = parsed.get("results", [])
     except Exception as exc:

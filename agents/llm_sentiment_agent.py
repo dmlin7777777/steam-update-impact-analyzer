@@ -1,5 +1,5 @@
 # agents/llm_sentiment_agent.py
-# LangGraph node: Claude haiku re-scores VADER gray-zone reviews and updates
+# LangGraph node: LLM re-scores VADER gray-zone reviews and updates
 # the review sentiment stats in state.analysis.
 #
 # Only touches review_analysis — event_analysis is left untouched because
@@ -51,8 +51,13 @@ def llm_sentiment_node(state: PipelineState) -> dict:
             model=LLM_MODEL_LIGHT,
             system=_SYSTEM,
             user=numbered,
-            max_tokens=256,
+            max_tokens=1024,
+            json_mode=True,
         )
+        # Strip markdown code fences if present
+        import re
+        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
+        raw = re.sub(r'\n?```\s*$', '', raw)
         labels = json.loads(raw)
         if not isinstance(labels, list):
             raise ValueError("unexpected response format")
@@ -66,12 +71,12 @@ def llm_sentiment_node(state: PipelineState) -> dict:
     labels = [lbl if lbl in valid else "neutral" for lbl in labels]
     labels = (labels + ["neutral"] * len(gray_df))[:len(gray_df)]
 
-    # Apply corrected labels
+    # Apply corrected labels to gray-zone rows
     import pandas as pd
     updated_df = df.copy()
-    updated_df.loc[gray_mask.values[:len(updated_df)], "sentiment_label"] = (
-        labels[:gray_mask.sum()]
-    )
+    gray_indices = gray_df.index   # use index, not boolean mask
+    n_labels = min(len(labels), len(gray_indices))
+    updated_df.loc[gray_indices[:n_labels], "sentiment_label"] = labels[:n_labels]
 
     # Recompute review sentiment stats (NOT event sentiment)
     label_counts = updated_df["sentiment_label"].value_counts(normalize=True)
