@@ -221,33 +221,28 @@ def _parse_steam_timestamp(ts: str) -> Optional[datetime]:
 def comments_to_dataframe(
     comments: list[dict],
     fallback_timestamp: "Optional[datetime]" = None,
-    weight: float = 3.0,
 ):
     """
-    Convert raw comment dicts to a DataFrame compatible with the review schema.
+    Convert raw comment dicts to a DataFrame.
 
     Columns produced:
         review_id, review_content, voted_up, timestamp,
-        playtime_hours, votes_up, votes_funny, source, weight
+        playtime_hours, votes_up, votes_funny, source
+
     The `source` column is set to "event_comment" to distinguish from reviews.
-    The `weight` column is used by compute_sentiment_stats to give these
-    comments higher influence than regular reviews in the sentiment average.
+    Note: event comments are NOT processed through VADER — they go through the
+    LLM Map-Reduce pipeline in core/event_analysis.py instead.  This DataFrame
+    is kept in pipeline state for reference and for passing raw text to the
+    Map-Reduce pipeline.
 
     Args:
         comments:           Raw comment dicts from fetch_event_comments().
-        fallback_timestamp: Used when a comment's published_at cannot be parsed
-                            (Steam renders timestamps via JS; they are often
-                            absent in static HTML).  Typically set to the patch
-                            note's published_at so comments are treated as
-                            post-update data.
-        weight:             Influence multiplier relative to a regular review
-                            (weight=1.0).  Defaults to EVENT_COMMENT_WEIGHT from
-                            config (3.0), meaning 1 comment ≈ 3 reviews.
+        fallback_timestamp: Used when a comment's published_at cannot be parsed.
     """
     import pandas as pd
 
     _COLS = ["review_id", "review_content", "voted_up",
-             "timestamp", "playtime_hours", "votes_up", "votes_funny", "source", "weight"]
+             "timestamp", "playtime_hours", "votes_up", "votes_funny", "source"]
 
     if not comments:
         return pd.DataFrame(columns=_COLS)
@@ -283,7 +278,6 @@ def comments_to_dataframe(
             "votes_up":       c.get("upvotes", 0),
             "votes_funny":    0,
             "source":         "event_comment",
-            "weight":         weight,
         })
 
     if not rows:

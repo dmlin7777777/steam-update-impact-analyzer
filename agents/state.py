@@ -97,16 +97,36 @@ class LLMReviewOutput(BaseModel):
     n_uncertain: int
 
 
+class EventAnalysisResult(BaseModel):
+    """LLM-derived analysis of event comments (Map-Reduce output)."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    n_comments:        int
+    positive_pct:      float
+    negative_pct:      float
+    neutral_pct:       float
+    top_themes:        list[dict]     # [{"label": ..., "count": ...}]
+    representative_quotes: list[dict] # [{"text": ..., "sentiment": ...}]
+    llm_summary:       str            # qualitative assessment from Reduce step
+
+
+class ReviewAnalysisResult(BaseModel):
+    """VADER-based analysis of reviews + disagreement detection."""
+    sentiment:         SentimentStats
+    n_disagreements:   int = 0        # VADER-positive but voted_up=False
+    disagreement_pct:  float = 0.0
+    distribution_summary: str = ""    # raw data distribution for LLM context
+
+
 class AnalysisOutput(BaseModel):
-    pre_sentiment:           SentimentStats
-    post_sentiment:          SentimentStats   # blended: event comments (primary) + reviews (secondary)
-    event_comment_sentiment: Optional[SentimentStats] = None  # event comments alone, for transparency
-    review_sentiment:        Optional[SentimentStats] = None  # reviews alone, for transparency
-    sentiment_delta: float              # post.mean_compound − pre.mean_compound
-    top_topics:      list[TopicCount]
-    risk_signals:    list[RiskSignal]
-    overall_risk:    Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    gray_zone_count: int                # reviews needing LLM sentiment re-score
+    pre_sentiment:    SentimentStats            # baseline (pre-update reviews)
+    review_analysis:  Optional[ReviewAnalysisResult] = None  # post-update reviews (VADER path)
+    event_analysis:   Optional[EventAnalysisResult]  = None  # event comments (LLM path)
+    sentiment_delta:  float              # review_analysis compound - pre compound
+    top_topics:       list[TopicCount]
+    risk_signals:     list[RiskSignal]
+    overall_risk:     Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    gray_zone_count:  int                # reviews needing LLM sentiment re-score
 
 
 # ── LangGraph pipeline state ──────────────────────────────────────────────────

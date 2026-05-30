@@ -53,27 +53,11 @@ TOPIC_LABELS = [
     "other",          # doesn't fit above
 ]
 
-# ── Event comment blending ────────────────────────────────────────────────────
-# Comments posted directly under an update announcement are the primary signal.
-# General reviews from the nearby window are supplementary context.
-#
-# Blending strategy (fixed ratio, not per-row weight):
-#   post_sentiment = EVENT_BLEND_RATIO  × event_comment_sentiment
-#                  + (1 - EVENT_BLEND_RATIO) × review_sentiment
-#
-# Using a fixed ratio means event comments ALWAYS dominate regardless of raw
-# counts — e.g. 500 event comments vs 5000 reviews still gives event comments
-# 70% of the influence.  When no event comments are available, falls back to
-# 100% reviews.
-EVENT_COMMENT_WEIGHT = 3.0   # kept for DataFrame column; no longer used in stats
-EVENT_BLEND_RATIO    = 0.70  # event comments → 70%, reviews → 30%
-
 # ── Risk scoring rules ────────────────────────────────────────────────────────
 ALERT_THRESHOLDS = {
-    "sentiment_drop":         0.15,   # post−pre compound score drop
+    "sentiment_drop":         0.15,   # post-pre compound score drop
     "negative_surge_pct":     0.60,   # fraction of negative reviews
     "review_rate_multiplier": 3.0,    # post-update volume vs baseline
-    "z_score_anomaly":        2.0,    # rolling z-score to flag as anomaly
 }
 
 # ── LLM models ────────────────────────────────────────────────────────────────

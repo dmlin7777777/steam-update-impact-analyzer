@@ -12,40 +12,41 @@ from core.features import extract_features
 
 def analysis_node(state: PipelineState) -> dict:
     """
-    Reads:  pre_reviews, cleaned_reviews (post-update), event_comments
+    Reads:  pre_reviews, cleaned_reviews (post-update), event_comments, patch_notes
     Writes: analysis, pre_reviews (enriched), current_step
 
-    Data architecture
-    -----------------
-    Event comments and reviews are kept SEPARATE and passed independently to
-    run_analysis().  Inside run_analysis(), sentiment is computed for each
-    source independently, then blended at a fixed ratio:
+    Two independent analysis paths
+    ------------------------------
+    1. Event comments (primary):
+       Raw comment text -> Map-Reduce LLM pipeline (core/event_analysis.py).
+       Every comment is read by the LLM directly. No VADER, no preprocessing.
 
-        post_sentiment = EVENT_BLEND_RATIO  x event_comment_sentiment   (primary)
-                       + (1-EVENT_BLEND_RATIO) x review_sentiment       (secondary)
+    2. Reviews (secondary):
+       VADER sentiment + voted_up disagreement detection + distribution summary.
+       Topic tagging via Claude Haiku.
 
-    This guarantees that event comments always dominate regardless of how many
-    reviews exist in the window.  Topic tagging still uses all data combined.
+    Both paths' results are passed to run_analysis() which computes risk signals
+    from both sources independently.
     """
     pre_df   = state.get("pre_reviews")
     post_df  = state.get("cleaned_reviews")
     event_df = state.get("event_comments")
+    patch_notes = state.get("patch_notes", [])
 
     errors: list[str] = []
 
     if pre_df is None or pre_df.empty:
-        errors.append("[analysis] pre_reviews is empty — baseline will be zero")
+        errors.append("[analysis] pre_reviews is empty -- baseline will be zero")
         pre_df = pd.DataFrame()
 
     if post_df is None or post_df.empty:
-        errors.append("[analysis] cleaned_reviews is empty — nothing to analyse")
+        errors.append("[analysis] cleaned_reviews is empty -- nothing to analyse")
         post_df = pd.DataFrame()
 
-    # Feature extraction on pre-update reviews
+    # ── Feature extraction on reviews ────────────────────────────────────────
     if not pre_df.empty and "vader_compound" not in pre_df.columns:
         pre_df = extract_features(pre_df)
 
-    # Feature extraction on post-update reviews (only rows missing features)
     if not post_df.empty:
         missing = (
             post_df["vader_compound"].isna()
@@ -57,15 +58,41 @@ def analysis_node(state: PipelineState) -> dict:
             needs_feat = extract_features(post_df[missing].copy())
             post_df    = pd.concat([has_feat, needs_feat], ignore_index=True)
 
-    # event_df feature extraction is handled inside run_analysis()
-
+    # ── Event comment analysis (Map-Reduce LLM path) ────────────────────────
+    event_analysis_result = None
     if event_df is not None and not event_df.empty:
-        errors.append(
-            f"[analysis] {len(event_df)} announcement comments available "
-            f"(primary signal, 70% blend weight)."
-        )
+        from core.event_analysis import analyse_event_comments
 
-    analysis = run_analysis(pre_df, post_df, event_df)
+        # Extract raw comment texts — no preprocessing
+        comment_texts = event_df["review_content"].dropna().tolist()
+
+        # Build patch notes context
+        patch_context = ""
+        if patch_notes:
+            patch_context = "\n\n".join(
+                f"--- {pn.title} ---\n{pn.contents[:600]}"
+                for pn in patch_notes[:3]
+            )
+
+        if comment_texts:
+            errors.append(
+                f"[analysis] Analysing {len(comment_texts)} announcement comments "
+                f"via LLM Map-Reduce (primary signal)."
+            )
+            event_analysis_result = analyse_event_comments(
+                comment_texts, patch_context
+            )
+            if event_analysis_result:
+                errors.append(
+                    f"[analysis] Announcement sentiment: "
+                    f"{event_analysis_result.positive_pct:.0%} pos / "
+                    f"{event_analysis_result.negative_pct:.0%} neg / "
+                    f"{event_analysis_result.neutral_pct:.0%} neu "
+                    f"({event_analysis_result.n_comments} comments)"
+                )
+
+    # ── Run analysis (two independent paths) ─────────────────────────────────
+    analysis = run_analysis(pre_df, post_df, event_analysis_result)
 
     return {
         "analysis":     analysis,

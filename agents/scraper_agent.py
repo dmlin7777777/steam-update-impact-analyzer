@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from agents.state import PatchNote, PipelineState, ScraperOutput
 from core.scraper import SteamAPIError, fetch_app_details, fetch_patch_notes, fetch_reviews
 from core.event_comments import fetch_event_comments, comments_to_dataframe
-from config import EVENT_COMMENT_WEIGHT
 
 # Reviews older than this many days cannot be reliably fetched from Steam's
 # recent-first API without paging through huge volumes of newer data.
@@ -152,8 +151,7 @@ def _fetch_closest_event_comments(
         raw = fetch_event_comments(appid, news_url=note.url, news_gid=note.gid)
         # Pass the patch note's published_at as fallback timestamp so comments
         # without a parseable timestamp are still treated as post-update data.
-        df  = comments_to_dataframe(raw, fallback_timestamp=note.published_at,
-                                    weight=EVENT_COMMENT_WEIGHT)
+        df  = comments_to_dataframe(raw, fallback_timestamp=note.published_at)
         if not df.empty:
             return df
         return pd.DataFrame()

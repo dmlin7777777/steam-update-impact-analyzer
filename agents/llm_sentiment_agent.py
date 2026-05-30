@@ -1,6 +1,9 @@
 # agents/llm_sentiment_agent.py
 # LangGraph node: Claude haiku re-scores VADER gray-zone reviews and updates
-# the sentiment stats in state.analysis.
+# the review sentiment stats in state.analysis.
+#
+# Only touches review_analysis — event_analysis is left untouched because
+# event comments were already analysed by the LLM Map-Reduce pipeline.
 
 from __future__ import annotations
 
@@ -8,7 +11,7 @@ import json
 
 import anthropic
 
-from agents.state import PipelineState, SentimentStats
+from agents.state import PipelineState, ReviewAnalysisResult, SentimentStats
 from config import LLM_MODEL_LIGHT, VADER_GRAY_LO
 
 _client = anthropic.Anthropic()
@@ -23,11 +26,10 @@ _SYSTEM = (
 def llm_sentiment_node(state: PipelineState) -> dict:
     """
     Reads:  cleaned_reviews (post-update), analysis
-    Writes: analysis (updated sentiment stats), current_step
+    Writes: analysis (updated review_analysis sentiment), current_step
 
     Only reviews with VADER compound in the gray zone are re-scored.
-    The corrected labels are used to recompute SentimentStats, which
-    replaces analysis.post_sentiment.
+    Updates analysis.review_analysis.sentiment — does NOT touch event_analysis.
     """
     df       = state.get("cleaned_reviews")
     analysis = state.get("analysis")
@@ -37,7 +39,7 @@ def llm_sentiment_node(state: PipelineState) -> dict:
 
     # Identify gray-zone rows
     gray_mask = df["vader_compound"].between(-VADER_GRAY_LO, VADER_GRAY_LO)
-    gray_df   = df[gray_mask].head(100)   # cap to avoid runaway cost
+    gray_df   = df[gray_mask].head(100)
 
     if gray_df.empty:
         return {"current_step": "llm_sentiment_done"}
@@ -55,8 +57,8 @@ def llm_sentiment_node(state: PipelineState) -> dict:
                      "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": numbered}],
         )
-        raw     = msg.content[0].text.strip()
-        labels  = json.loads(raw)   # list[str]
+        raw    = msg.content[0].text.strip()
+        labels = json.loads(raw)
         if not isinstance(labels, list):
             raise ValueError("unexpected response format")
     except Exception as exc:
@@ -65,20 +67,18 @@ def llm_sentiment_node(state: PipelineState) -> dict:
             "errors":       [f"[llm_sentiment] {exc}"],
         }
 
-    # Clamp to valid labels
     valid = {"positive", "neutral", "negative"}
     labels = [lbl if lbl in valid else "neutral" for lbl in labels]
-    # Pad/truncate to match gray_df length
-    labels = (labels + ["neutral"] * len(gray_df))[: len(gray_df)]
+    labels = (labels + ["neutral"] * len(gray_df))[:len(gray_df)]
 
-    # Apply corrected labels to a copy of the df
+    # Apply corrected labels
     import pandas as pd
     updated_df = df.copy()
     updated_df.loc[gray_mask.values[:len(updated_df)], "sentiment_label"] = (
         labels[:gray_mask.sum()]
     )
 
-    # Recompute SentimentStats from corrected labels
+    # Recompute review sentiment stats (NOT event sentiment)
     label_counts = updated_df["sentiment_label"].value_counts(normalize=True)
     corrected_stats = SentimentStats(
         mean_compound= float(updated_df["vader_compound"].mean()),
@@ -88,9 +88,15 @@ def llm_sentiment_node(state: PipelineState) -> dict:
         n_reviews=     len(updated_df),
     )
 
-    # Rebuild analysis with corrected post_sentiment
+    # Update ONLY review_analysis, preserve event_analysis
+    updated_review = None
+    if analysis.review_analysis is not None:
+        updated_review = analysis.review_analysis.model_copy(
+            update={"sentiment": corrected_stats}
+        )
+
     updated_analysis = analysis.model_copy(
-        update={"post_sentiment": corrected_stats}
+        update={"review_analysis": updated_review}
     )
 
     return {

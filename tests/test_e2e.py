@@ -211,3 +211,75 @@ def test_sentiment_stats_empty_df():
     stats = compute_sentiment_stats(pd.DataFrame())
     assert stats.n_reviews == 0
     assert stats.mean_compound == 0.0
+
+
+def test_disagreement_detection():
+    """Unit test: detect_disagreements finds VADER-vs-voted_up contradictions."""
+    from core.analysis import detect_disagreements
+
+    df = pd.DataFrame({
+        "review_content": [
+            "Great job breaking the game",     # sarcastic negative
+            "Terrible but I still love it",     # understated positive
+            "Amazing update, well done",        # genuine positive
+        ],
+        "voted_up":        [False, True,  True],
+        "vader_compound":  [0.65,  -0.50, 0.70],   # VADER gets #1 and #2 wrong
+    })
+    n, pct, disagreement_df = detect_disagreements(df)
+    assert n == 2, f"Expected 2 disagreements, got {n}"
+    assert len(disagreement_df) == 2
+    assert pct > 0.5  # 2/3 = 66%
+
+
+def test_distribution_summary():
+    """Unit test: build_distribution_summary generates factual description."""
+    from core.analysis import build_distribution_summary
+
+    df = pd.DataFrame({
+        "review_content": ["L", "L", "L", "W", "This update is amazing and I love it"],
+        "voted_up":       [False, False, False, True, True],
+        "vader_compound": [-0.1, -0.1, -0.1, 0.5, 0.8],
+    })
+    summary = build_distribution_summary(df)
+    assert "5 reviews total" in summary
+    assert "Recommended: 2" in summary
+    assert '"L"' in summary   # should show high-frequency short reviews
+
+
+def test_event_analysis_result_structure():
+    """Unit test: EventCommentAnalysis dataclass fields."""
+    from core.event_analysis import EventCommentAnalysis
+
+    result = EventCommentAnalysis(
+        n_comments=100,
+        positive_count=30,
+        negative_count=50,
+        neutral_count=20,
+        positive_pct=0.30,
+        negative_pct=0.50,
+        neutral_pct=0.20,
+        top_themes=[{"label": "test", "count": 10}],
+        representative_quotes=[{"text": "test quote", "sentiment": "negative"}],
+        llm_summary="Test summary",
+        patch_context="Test context",
+    )
+    assert result.n_comments == 100
+    assert result.negative_pct == 0.50
+
+
+def test_risk_signals_event_negativity():
+    """Unit test: R4 signal fires when event comment negativity > 50%."""
+    from core.analysis import compute_risk_signals
+    from agents.state import SentimentStats, EventAnalysisResult
+
+    pre = SentimentStats(mean_compound=0.2, positive_pct=0.6, neutral_pct=0.2,
+                         negative_pct=0.2, n_reviews=100)
+    event = EventAnalysisResult(
+        n_comments=200, positive_pct=0.20, negative_pct=0.65, neutral_pct=0.15,
+        top_themes=[], representative_quotes=[], llm_summary="",
+    )
+    signals = compute_risk_signals(pre, review_analysis=None, event_analysis=event)
+    r4_signals = [s for s in signals if s.rule == "R4"]
+    assert len(r4_signals) == 1
+    assert r4_signals[0].severity == "HIGH"

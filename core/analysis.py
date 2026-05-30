@@ -1,8 +1,19 @@
 # core/analysis.py
-# Post-update impact analysis: sentiment comparison, topic tagging, risk scoring.
+# Post-update impact analysis: sentiment stats, topic tagging, risk scoring.
 #
-# All functions are pure (no side effects). Topic tagging calls Claude haiku
-# in batches to keep cost low.
+# Two analysis paths feed into this module:
+#
+#   1. Reviews (post-update):  VADER sentiment + voted_up disagreement detection.
+#      VADER is fast but unreliable on sarcasm/slang. Disagreement detection
+#      (VADER-positive but voted_up=False) surfaces likely misclassifications.
+#      A distribution summary of raw data is generated for downstream LLM context.
+#
+#   2. Event comments:  analysed by core/event_analysis.py (Map-Reduce LLM path).
+#      This module does NOT process event comments — it receives the finished
+#      EventCommentAnalysis result and incorporates it into risk scoring.
+#
+# Topic tagging still uses Claude Haiku for reviews (event comment topics come
+# from the Map-Reduce pipeline).
 
 from __future__ import annotations
 
@@ -15,13 +26,14 @@ import pandas as pd
 
 from agents.state import (
     AnalysisOutput,
+    EventAnalysisResult,
+    ReviewAnalysisResult,
     RiskSignal,
     SentimentStats,
     TopicCount,
 )
 from config import (
     ALERT_THRESHOLDS,
-    EVENT_BLEND_RATIO,
     LLM_MODEL_LIGHT,
     TOPIC_LABELS,
     VADER_GRAY_LO,
@@ -30,18 +42,12 @@ from config import (
 _client = anthropic.Anthropic()
 
 
-# ── Sentiment aggregation ─────────────────────────────────────────────────────
+# ── Sentiment aggregation (reviews only — event comments use LLM path) ───────
 
 def compute_sentiment_stats(df: pd.DataFrame) -> SentimentStats:
     """
     Aggregate VADER scores into SentimentStats.
-
     Requires columns: vader_compound, sentiment_label.
-    Optional column:  weight  (float, default 1.0 per row)
-
-    When a `weight` column is present (e.g. event comments carry weight=3.0),
-    all averages and label percentages become weighted so high-signal rows
-    pull the stats more than low-signal ones.
     """
     if df.empty:
         return SentimentStats(
@@ -49,58 +55,80 @@ def compute_sentiment_stats(df: pd.DataFrame) -> SentimentStats:
             neutral_pct=0.0,   negative_pct=0.0, n_reviews=0,
         )
 
-    weights = df["weight"] if "weight" in df.columns else pd.Series(1.0, index=df.index)
-    total_w = float(weights.sum())
-
-    mean_compound = float(np.average(df["vader_compound"], weights=weights))
-
-    def _wpct(label: str) -> float:
-        return float(weights[df["sentiment_label"] == label].sum()) / total_w
-
+    label_counts = df["sentiment_label"].value_counts(normalize=True)
     return SentimentStats(
-        mean_compound=mean_compound,
-        positive_pct= _wpct("positive"),
-        neutral_pct=  _wpct("neutral"),
-        negative_pct= _wpct("negative"),
+        mean_compound=float(df["vader_compound"].mean()),
+        positive_pct= float(label_counts.get("positive", 0.0)),
+        neutral_pct=  float(label_counts.get("neutral",  0.0)),
+        negative_pct= float(label_counts.get("negative", 0.0)),
         n_reviews=    len(df),
     )
 
 
-def blend_sentiment_stats(
-    event_stats:  SentimentStats,
-    review_stats: SentimentStats,
-    event_ratio:  float = EVENT_BLEND_RATIO,
-) -> SentimentStats:
+# ── Disagreement detection (VADER vs voted_up) ──────────────────────────────
+
+def detect_disagreements(df: pd.DataFrame) -> tuple[int, float, pd.DataFrame]:
     """
-    Blend event-comment sentiment (primary) with review sentiment (secondary)
-    using a fixed ratio that is independent of raw row counts.
+    Find reviews where VADER sentiment contradicts the player's own vote.
 
-    With event_ratio=0.70:
-      - Event comments always contribute 70% of the final score
-      - Reviews contribute the remaining 30%
-      - 500 event comments vs 5000 reviews → event comments still 70%
+    VADER compound > 0.05 but voted_up=False  → likely sarcasm/irony.
+    VADER compound < -0.05 but voted_up=True  → likely understated praise.
 
-    Falls back gracefully:
-      - No event comments → 100% reviews
-      - No reviews        → 100% event comments
+    Returns:
+        (n_disagreements, disagreement_pct, disagreement_rows_df)
     """
-    if event_stats.n_reviews == 0:
-        return review_stats
-    if review_stats.n_reviews == 0:
-        return event_stats
+    if df.empty or "vader_compound" not in df.columns or "voted_up" not in df.columns:
+        return 0, 0.0, pd.DataFrame()
 
-    r = event_ratio
-    s = 1.0 - r
-    return SentimentStats(
-        mean_compound=round(r * event_stats.mean_compound + s * review_stats.mean_compound, 4),
-        positive_pct= round(r * event_stats.positive_pct  + s * review_stats.positive_pct,  4),
-        neutral_pct=  round(r * event_stats.neutral_pct   + s * review_stats.neutral_pct,   4),
-        negative_pct= round(r * event_stats.negative_pct  + s * review_stats.negative_pct,  4),
-        n_reviews=event_stats.n_reviews + review_stats.n_reviews,
+    disagree = (
+        ((df["vader_compound"] > 0.05) & (~df["voted_up"])) |
+        ((df["vader_compound"] < -0.05) & (df["voted_up"]))
     )
+    n = int(disagree.sum())
+    pct = round(n / max(len(df), 1), 4)
+    return n, pct, df[disagree]
 
 
-# ── Topic tagging (Claude haiku, batched) ─────────────────────────────────────
+# ── Distribution summary (raw data description for LLM context) ─────────────
+
+def build_distribution_summary(df: pd.DataFrame) -> str:
+    """
+    Generate a factual description of the raw review data distribution.
+    No interpretation — just numbers the LLM can reason about.
+    """
+    if df.empty:
+        return "No reviews in this window."
+
+    total = len(df)
+    lines = [f"{total} reviews total."]
+
+    # voted_up distribution
+    if "voted_up" in df.columns:
+        pos = int(df["voted_up"].sum())
+        neg = total - pos
+        lines.append(f"Recommended: {pos} ({pos/total:.0%}). Not recommended: {neg} ({neg/total:.0%}).")
+
+    # Short text distribution
+    if "review_content" in df.columns:
+        lens = df["review_content"].str.len()
+        short = df[lens < 10]
+        if len(short) > 0:
+            freq = short["review_content"].str.strip().value_counts().head(8)
+            short_str = ", ".join(f'"{t}" ({c}x)' for t, c in freq.items())
+            lines.append(f"{len(short)} reviews under 10 chars. Most common: {short_str}")
+
+    # VADER distribution
+    if "vader_compound" in df.columns:
+        lines.append(
+            f"VADER compound: mean={df['vader_compound'].mean():+.3f}, "
+            f"median={df['vader_compound'].median():+.3f}, "
+            f"std={df['vader_compound'].std():.3f}"
+        )
+
+    return "\n".join(lines)
+
+
+# ── Topic tagging (Claude haiku, batched) — reviews only ─────────────────────
 
 _TOPIC_SYSTEM = (
     "You are a game review analyst. Classify each review into exactly ONE topic "
@@ -112,10 +140,7 @@ _TOPIC_SYSTEM = (
 def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
     """
     Add a 'topic' column to df using Claude haiku batch classification.
-
-    Sends reviews in batches of `batch_size` to reduce API calls.
     Falls back to 'other' on any error.
-
     Requires column: review_content_processed
     """
     if df.empty:
@@ -140,16 +165,10 @@ def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
             )
             raw = msg.content[0].text.strip()
             parsed: list[str] = json.loads(raw)
-            # Clamp to known labels; fallback to 'other'
-            parsed = [
-                lbl if lbl in TOPIC_LABELS else "other"
-                for lbl in parsed
-            ]
-            # Pad or truncate to match chunk length
+            parsed = [lbl if lbl in TOPIC_LABELS else "other" for lbl in parsed]
             if len(parsed) < len(chunk):
                 parsed += ["other"] * (len(chunk) - len(parsed))
             labels.extend(parsed[: len(chunk)])
-
         except Exception:
             labels.extend(["other"] * len(chunk))
 
@@ -162,7 +181,6 @@ def aggregate_topics(df: pd.DataFrame) -> list[TopicCount]:
     """Count and rank topics from a tagged DataFrame."""
     if df.empty or "topic" not in df.columns:
         return []
-
     counts = df["topic"].value_counts()
     total  = len(df)
     return [
@@ -171,62 +189,102 @@ def aggregate_topics(df: pd.DataFrame) -> list[TopicCount]:
     ]
 
 
-# ── Risk scoring ──────────────────────────────────────────────────────────────
+# ── Risk scoring ─────────────────────────────────────────────────────────────
 
 def compute_risk_signals(
-    pre:  SentimentStats,
-    post: SentimentStats,
-    sentiment_delta: float,
+    pre: SentimentStats,
+    review_analysis: Optional[ReviewAnalysisResult],
+    event_analysis:  Optional[EventAnalysisResult],
 ) -> list[RiskSignal]:
     """
-    Apply rule-based risk checks and return triggered signals.
-    All thresholds come from config.ALERT_THRESHOLDS.
+    Apply risk checks using BOTH data sources.
+
+    Review-based signals (R1-R3): use VADER stats from review_analysis.
+    Event-comment signals (R4-R5): use LLM-derived stats from event_analysis.
     """
     signals: list[RiskSignal] = []
 
-    # R1 — Sentiment drop
-    thresh_drop = ALERT_THRESHOLDS["sentiment_drop"]
-    if sentiment_delta < -thresh_drop:
-        signals.append(RiskSignal(
-            rule="R1",
-            severity=_drop_severity(sentiment_delta),
-            value=round(sentiment_delta, 4),
-            threshold=-thresh_drop,
-            description=(
-                f"Sentiment dropped {abs(sentiment_delta):.3f} points "
-                f"(threshold {thresh_drop})"
-            ),
-        ))
+    # ── Review-based signals ─────────────────────────────────────────────────
+    if review_analysis is not None:
+        post = review_analysis.sentiment
+        delta = round(post.mean_compound - pre.mean_compound, 4)
 
-    # R2 — Negative surge
-    thresh_neg = ALERT_THRESHOLDS["negative_surge_pct"]
-    if post.negative_pct > thresh_neg:
-        signals.append(RiskSignal(
-            rule="R2",
-            severity="HIGH" if post.negative_pct < 0.75 else "CRITICAL",
-            value=round(post.negative_pct, 4),
-            threshold=thresh_neg,
-            description=(
-                f"{post.negative_pct:.1%} of post-update reviews are negative "
-                f"(threshold {thresh_neg:.0%})"
-            ),
-        ))
-
-    # R3 — Review-volume spike (approximated by n_reviews ratio)
-    if pre.n_reviews > 0:
-        rate_multiplier = post.n_reviews / pre.n_reviews
-        thresh_rate     = ALERT_THRESHOLDS["review_rate_multiplier"]
-        if rate_multiplier > thresh_rate:
+        # R1 — Sentiment drop (reviews)
+        thresh_drop = ALERT_THRESHOLDS["sentiment_drop"]
+        if delta < -thresh_drop:
             signals.append(RiskSignal(
-                rule="R3",
-                severity="MEDIUM",
-                value=round(rate_multiplier, 2),
-                threshold=thresh_rate,
+                rule="R1",
+                severity=_drop_severity(delta),
+                value=round(delta, 4),
+                threshold=-thresh_drop,
                 description=(
-                    f"Review volume spiked {rate_multiplier:.1f}× baseline "
-                    f"(threshold {thresh_rate:.0f}×)"
+                    f"Review sentiment dropped {abs(delta):.3f} points "
+                    f"(threshold {thresh_drop})"
                 ),
             ))
+
+        # R2 — Negative surge (reviews)
+        thresh_neg = ALERT_THRESHOLDS["negative_surge_pct"]
+        if post.negative_pct > thresh_neg:
+            signals.append(RiskSignal(
+                rule="R2",
+                severity="HIGH" if post.negative_pct < 0.75 else "CRITICAL",
+                value=round(post.negative_pct, 4),
+                threshold=thresh_neg,
+                description=(
+                    f"{post.negative_pct:.1%} of post-update reviews are negative "
+                    f"(threshold {thresh_neg:.0%})"
+                ),
+            ))
+
+        # R3 — Review-volume spike
+        if pre.n_reviews > 0:
+            rate = post.n_reviews / pre.n_reviews
+            thresh_rate = ALERT_THRESHOLDS["review_rate_multiplier"]
+            if rate > thresh_rate:
+                signals.append(RiskSignal(
+                    rule="R3",
+                    severity="MEDIUM",
+                    value=round(rate, 2),
+                    threshold=thresh_rate,
+                    description=(
+                        f"Review volume spiked {rate:.1f}x baseline "
+                        f"(threshold {thresh_rate:.0f}x)"
+                    ),
+                ))
+
+    # ── Event-comment signals ────────────────────────────────────────────────
+    if event_analysis is not None:
+        # R4 — Announcement negativity (LLM-assessed)
+        if event_analysis.negative_pct > 0.50:
+            sev = "CRITICAL" if event_analysis.negative_pct > 0.70 else "HIGH"
+            signals.append(RiskSignal(
+                rule="R4",
+                severity=sev,
+                value=round(event_analysis.negative_pct, 4),
+                threshold=0.50,
+                description=(
+                    f"{event_analysis.negative_pct:.1%} of announcement comments are "
+                    f"negative (LLM-assessed, {event_analysis.n_comments} comments)"
+                ),
+            ))
+
+        # R5 — Announcement-vs-review divergence
+        if review_analysis is not None:
+            review_neg = review_analysis.sentiment.negative_pct
+            event_neg  = event_analysis.negative_pct
+            divergence = abs(event_neg - review_neg)
+            if divergence > 0.20:
+                signals.append(RiskSignal(
+                    rule="R5",
+                    severity="MEDIUM",
+                    value=round(divergence, 4),
+                    threshold=0.20,
+                    description=(
+                        f"Announcement comments ({event_neg:.0%} neg) diverge from "
+                        f"reviews ({review_neg:.0%} neg) by {divergence:.0%}"
+                    ),
+                ))
 
     return signals
 
@@ -247,100 +305,92 @@ def _overall_risk(signals: list[RiskSignal]) -> str:
     return top.severity
 
 
-# ── Z-score anomaly check ─────────────────────────────────────────────────────
-
-def compute_rolling_zscore(
-    df: pd.DataFrame,
-    window: str = "24h",
-    col: str    = "vader_compound",
-) -> pd.Series:
-    """
-    Rolling Z-score of `col` over a time window.
-    df must have a DatetimeIndex or a 'timestamp' column.
-    """
-    s = df.set_index("timestamp")[col].sort_index()
-    rolling = s.rolling(window, min_periods=2)
-    z = (s - rolling.mean()) / rolling.std().replace(0, np.nan)
-    return z.fillna(0.0)
-
-
-# ── Orchestrating entry point ─────────────────────────────────────────────────
+# ── Orchestrating entry point ────────────────────────────────────────────────
 
 def run_analysis(
-    pre_df:   pd.DataFrame,
-    post_df:  pd.DataFrame,
-    event_df: Optional[pd.DataFrame] = None,
+    pre_df:          pd.DataFrame,
+    post_df:         pd.DataFrame,
+    event_analysis:  Optional[EventAnalysisResult] = None,
 ) -> AnalysisOutput:
     """
     Full analysis pipeline for one update event.
 
-    Data sources
-    ------------
-    pre_df   : reviews from the pre-update window (baseline).
-    post_df  : reviews from the post-update window (supplementary).
-    event_df : comments posted directly under the update announcement (primary).
+    Two independent paths:
+      1. Reviews (post_df):   VADER stats + disagreement detection
+      2. Event comments:      Already analysed via Map-Reduce LLM, passed in as
+                              EventAnalysisResult (from core/event_analysis.py)
 
-    Sentiment blending
-    ------------------
-    When event_df is available, post_sentiment is a fixed-ratio blend:
-        post_sentiment = EVENT_BLEND_RATIO  × event_comment_sentiment
-                       + (1 − EVENT_BLEND_RATIO) × review_sentiment
-
-    This means event comments always dominate regardless of raw counts
-    (e.g. 500 event comments vs 5000 reviews → event comments still 70%).
-    When no event comments are available, falls back to 100% reviews.
-
-    Topic tagging uses all post-update data (reviews + event comments combined).
+    Risk signals combine both paths. Topic tagging is applied to reviews only
+    (event comment themes come from the Map-Reduce pipeline).
     """
-    from core.features import extract_features
+    pre_stats = compute_sentiment_stats(pre_df)
 
-    # ── Feature extraction for event_df if needed ────────────────────────────
-    if event_df is not None and not event_df.empty:
-        if "vader_compound" not in event_df.columns:
-            event_df = extract_features(event_df)
+    # ── Review analysis path ─────────────────────────────────────────────────
+    review_result: Optional[ReviewAnalysisResult] = None
+    if not post_df.empty:
+        review_stats = compute_sentiment_stats(post_df)
+        n_disagree, disagree_pct, _ = detect_disagreements(post_df)
+        dist_summary = build_distribution_summary(post_df)
 
-    # ── Compute raw sentiment for each source independently ───────────────────
-    pre_stats    = compute_sentiment_stats(pre_df)
-    review_stats = compute_sentiment_stats(post_df)
-    event_stats  = compute_sentiment_stats(event_df) \
-                   if event_df is not None and not event_df.empty else None
+        review_result = ReviewAnalysisResult(
+            sentiment=review_stats,
+            n_disagreements=n_disagree,
+            disagreement_pct=disagree_pct,
+            distribution_summary=dist_summary,
+        )
 
-    # ── Blend: event comments primary, reviews secondary ─────────────────────
-    if event_stats is not None:
-        post_stats = blend_sentiment_stats(event_stats, review_stats)
-    else:
-        post_stats = review_stats
+    # ── Sentiment delta (reviews only — event comments have no compound) ─────
+    delta = 0.0
+    if review_result is not None:
+        delta = round(review_result.sentiment.mean_compound - pre_stats.mean_compound, 4)
 
-    delta = round(post_stats.mean_compound - pre_stats.mean_compound, 4)
+    # ── Topic tagging on reviews ─────────────────────────────────────────────
+    post_tagged = tag_topics(post_df) if not post_df.empty else post_df
+    review_topics = aggregate_topics(post_tagged)
 
-    # ── Topic tagging on all post-update data (reviews + event comments) ─────
-    all_post_df = pd.concat(
-        [df for df in [post_df, event_df] if df is not None and not df.empty],
-        ignore_index=True,
-    ) if event_df is not None and not event_df.empty else post_df
+    # Merge event themes into topic list (event themes come from Map-Reduce)
+    if event_analysis is not None:
+        for theme in event_analysis.top_themes:
+            label = theme.get("label", "")
+            count = theme.get("count", 0)
+            if label:
+                review_topics.append(
+                    TopicCount(label=f"[announcement] {label}", count=count, pct=0.0)
+                )
+        # Re-sort by count
+        review_topics.sort(key=lambda t: t.count, reverse=True)
 
-    post_tagged = tag_topics(all_post_df) if not all_post_df.empty else all_post_df
-    top_topics  = aggregate_topics(post_tagged)
-
-    # ── Risk signals (based on blended post sentiment) ────────────────────────
-    signals      = compute_risk_signals(pre_stats, post_stats, delta)
+    # ── Risk signals (both paths) ────────────────────────────────────────────
+    signals      = compute_risk_signals(pre_stats, review_result, event_analysis)
     overall_risk = _overall_risk(signals)
 
-    # ── Gray-zone count for LLM re-score (all post-update rows) ──────────────
+    # ── Gray-zone count (reviews only) ───────────────────────────────────────
     gray_zone_count = int(
-        all_post_df["vader_compound"]
+        post_df["vader_compound"]
         .between(-VADER_GRAY_LO, VADER_GRAY_LO)
         .sum()
-    ) if not all_post_df.empty and "vader_compound" in all_post_df.columns else 0
+    ) if not post_df.empty and "vader_compound" in post_df.columns else 0
+
+    # ── Convert EventCommentAnalysis dataclass → EventAnalysisResult pydantic
+    event_result: Optional[EventAnalysisResult] = None
+    if event_analysis is not None:
+        event_result = EventAnalysisResult(
+            n_comments=event_analysis.n_comments,
+            positive_pct=event_analysis.positive_pct,
+            negative_pct=event_analysis.negative_pct,
+            neutral_pct=event_analysis.neutral_pct,
+            top_themes=event_analysis.top_themes,
+            representative_quotes=event_analysis.representative_quotes,
+            llm_summary=event_analysis.llm_summary,
+        )
 
     return AnalysisOutput(
-        pre_sentiment=           pre_stats,
-        post_sentiment=          post_stats,
-        event_comment_sentiment= event_stats,
-        review_sentiment=        review_stats if event_stats is not None else None,
-        sentiment_delta=         delta,
-        top_topics=              top_topics,
-        risk_signals=            signals,
-        overall_risk=            overall_risk,
+        pre_sentiment=   pre_stats,
+        review_analysis= review_result,
+        event_analysis=  event_result,
+        sentiment_delta= delta,
+        top_topics=      review_topics,
+        risk_signals=    signals,
+        overall_risk=    overall_risk,
         gray_zone_count= gray_zone_count,
     )

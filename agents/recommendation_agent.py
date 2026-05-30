@@ -1,6 +1,6 @@
 # agents/recommendation_agent.py
-# LangGraph node: Claude sonnet synthesises analysis + patch notes into
-# a structured recommendation report.
+# LangGraph node: Claude sonnet synthesises two independent analysis paths
+# into a structured recommendation report.
 
 from __future__ import annotations
 
@@ -19,27 +19,31 @@ _client = anthropic.Anthropic()
 
 _SYSTEM = """You are a senior game analytics consultant specialising in post-update player sentiment.
 
-You will receive:
-1. Pre-update and post-update sentiment statistics
-2. Detected topic breakdown (what players are talking about)
-3. Risk signals triggered by the update
-4. Patch notes for the update (may be empty)
+You will receive TWO independent data sources:
+
+1. ANNOUNCEMENT COMMENTS (primary signal):
+   Comments posted directly under the update announcement on Steam.
+   These are analysed by an LLM that read every comment. The sentiment stats,
+   themes, and representative quotes come directly from reading the raw text.
+
+2. GENERAL REVIEWS (secondary signal):
+   Reviews from the Steam store page posted in the same time window.
+   These are analysed with VADER (rule-based sentiment) + disagreement detection.
+   VADER can misclassify sarcasm — disagreement stats show where it likely failed.
+
+When the two sources disagree, trust the announcement comments more — they are
+direct reactions to THIS specific update, while reviews may discuss the game in general.
 
 Your task:
-A) Write a 2-3 paragraph executive summary in plain English explaining what happened
-   after the update and why player sentiment shifted (or didn't).
+A) Write a 2-3 paragraph executive summary explaining what happened after the update.
+   Use specific numbers and quotes as evidence. Be direct — no hedging.
 B) Produce a prioritised list of concrete, actionable recommendations.
 
 Reply with a single JSON object:
 {
   "narrative": "...",
   "items": [
-    {
-      "priority": "P1",
-      "issue": "...",
-      "action": "...",
-      "expected_impact": "..."
-    }
+    {"priority": "P1", "issue": "...", "action": "...", "expected_impact": "..."}
   ]
 }
 
@@ -50,98 +54,110 @@ Keep narrative under 300 words. Include 3-6 recommendation items.
 
 def recommendation_node(state: PipelineState) -> dict:
     """
-    Reads:  analysis, patch_notes, game_name, event_comments
+    Reads:  analysis, patch_notes, game_name
     Writes: recommendations, current_step
     """
-    analysis      = state.get("analysis")
-    patch_notes   = state.get("patch_notes", [])
-    game_name     = state.get("game_name", "Unknown Game")
-    event_df      = state.get("event_comments")
+    analysis    = state.get("analysis")
+    patch_notes = state.get("patch_notes", [])
+    game_name   = state.get("game_name", "Unknown Game")
 
     if analysis is None:
         return {
             "current_step": "done",
-            "errors":       ["[recommendation] no analysis available — skipping"],
+            "errors":       ["[recommendation] no analysis available -- skipping"],
         }
 
-    # Build context string for Claude
-    pre  = analysis.pre_sentiment
-    post = analysis.post_sentiment
-    ec   = analysis.event_comment_sentiment
-    rev  = analysis.review_sentiment
+    pre = analysis.pre_sentiment
 
     context_parts = [
         f"Game: {game_name}",
-        "",
-        "=== SENTIMENT COMPARISON ===",
-        f"Pre-update (reviews)  : compound={pre.mean_compound:+.3f}  "
-        f"pos={pre.positive_pct:.1%}  neu={pre.neutral_pct:.1%}  neg={pre.negative_pct:.1%}  "
-        f"(n={pre.n_reviews})",
-    ]
-
-    # Show event comments and reviews separately when both are available
-    if ec is not None and rev is not None:
-        context_parts += [
-            f"Post-update BLENDED   : compound={post.mean_compound:+.3f}  "
-            f"pos={post.positive_pct:.1%}  neu={post.neutral_pct:.1%}  neg={post.negative_pct:.1%}  "
-            f"(event 70% + reviews 30%)",
-            f"  Announcement comments: compound={ec.mean_compound:+.3f}  "
-            f"pos={ec.positive_pct:.1%}  neg={ec.negative_pct:.1%}  (n={ec.n_reviews}, PRIMARY)",
-            f"  General reviews      : compound={rev.mean_compound:+.3f}  "
-            f"pos={rev.positive_pct:.1%}  neg={rev.negative_pct:.1%}  (n={rev.n_reviews}, secondary)",
-        ]
-    else:
-        context_parts.append(
-            f"Post-update (reviews) : compound={post.mean_compound:+.3f}  "
-            f"pos={post.positive_pct:.1%}  neu={post.neutral_pct:.1%}  neg={post.negative_pct:.1%}  "
-            f"(n={post.n_reviews})"
-        )
-
-    context_parts += [
-        f"Delta       : {analysis.sentiment_delta:+.3f}",
         f"Overall risk: {analysis.overall_risk}",
         "",
-        "=== TOPIC BREAKDOWN (post-update) ===",
     ]
 
-    for tc in analysis.top_topics[:6]:
-        context_parts.append(f"  {tc.label:<20} {tc.pct:.1%}  ({tc.count} reviews)")
+    # ── Baseline ─────────────────────────────────────────────────────────────
+    context_parts += [
+        "=== BASELINE (pre-update reviews) ===",
+        f"compound={pre.mean_compound:+.3f}  "
+        f"pos={pre.positive_pct:.1%}  neu={pre.neutral_pct:.1%}  neg={pre.negative_pct:.1%}  "
+        f"(n={pre.n_reviews})",
+        "",
+    ]
 
+    # ── Source 1: Announcement comments (primary) ────────────────────────────
+    ea = analysis.event_analysis
+    if ea is not None:
+        context_parts += [
+            f"=== ANNOUNCEMENT COMMENTS — PRIMARY ({ea.n_comments} comments, LLM-analysed) ===",
+            f"Sentiment: {ea.positive_pct:.0%} positive, "
+            f"{ea.negative_pct:.0%} negative, {ea.neutral_pct:.0%} neutral",
+            "",
+            "Top themes:",
+        ]
+        for t in ea.top_themes[:6]:
+            context_parts.append(f"  - {t['label']} ({t['count']} mentions)")
+
+        context_parts += ["", "Representative quotes:"]
+        for q in ea.representative_quotes[:10]:
+            sent = q.get("sentiment", "?")
+            context_parts.append(f'  [{sent}] "{q["text"]}"')
+
+        context_parts += ["", "LLM assessment:", ea.llm_summary, ""]
+    else:
+        context_parts += [
+            "=== ANNOUNCEMENT COMMENTS ===",
+            "(none available -- game may use JS-rendered comments)",
+            "",
+        ]
+
+    # ── Source 2: General reviews (secondary) ────────────────────────────────
+    ra = analysis.review_analysis
+    if ra is not None:
+        s = ra.sentiment
+        context_parts += [
+            f"=== GENERAL REVIEWS — SECONDARY ({s.n_reviews} reviews, VADER-scored) ===",
+            f"compound={s.mean_compound:+.3f}  "
+            f"pos={s.positive_pct:.1%}  neu={s.neutral_pct:.1%}  neg={s.negative_pct:.1%}",
+            f"Sentiment delta vs baseline: {analysis.sentiment_delta:+.3f}",
+        ]
+        if ra.n_disagreements > 0:
+            context_parts.append(
+                f"VADER disagreements: {ra.n_disagreements} reviews "
+                f"({ra.disagreement_pct:.1%}) where VADER sentiment contradicts "
+                f"player's own thumbs-up/down vote (likely sarcasm/irony)"
+            )
+        if ra.distribution_summary:
+            context_parts += ["", "Data distribution:", ra.distribution_summary]
+        context_parts.append("")
+    else:
+        context_parts += [
+            "=== GENERAL REVIEWS ===",
+            "(no post-update reviews available)",
+            "",
+        ]
+
+    # ── Topics ───────────────────────────────────────────────────────────────
+    if analysis.top_topics:
+        context_parts += ["=== TOPIC BREAKDOWN ==="]
+        for tc in analysis.top_topics[:8]:
+            context_parts.append(f"  {tc.label:<30} ({tc.count} mentions)")
+        context_parts.append("")
+
+    # ── Risk signals ─────────────────────────────────────────────────────────
     if analysis.risk_signals:
-        context_parts += ["", "=== RISK SIGNALS ==="]
+        context_parts += ["=== RISK SIGNALS ==="]
         for rs in analysis.risk_signals:
             context_parts.append(f"  [{rs.severity}] {rs.rule}: {rs.description}")
+        context_parts.append("")
 
+    # ── Patch notes ──────────────────────────────────────────────────────────
     if patch_notes:
-        context_parts += ["", "=== PATCH NOTES ==="]
-        for pn in patch_notes[:3]:    # top 3 most recent
+        context_parts += ["=== PATCH NOTES ==="]
+        for pn in patch_notes[:3]:
             context_parts.append(f"--- {pn.title} ({pn.published_at.date()}) ---")
             context_parts.append(pn.contents[:800])
     else:
-        context_parts += ["", "=== PATCH NOTES ===", "(none available)"]
-
-    # Event comments — direct player reactions under the update announcement.
-    # These are higher-signal than general reviews and should be weighted accordingly.
-    if event_df is not None and not event_df.empty:
-        import pandas as pd
-        n_ec = len(event_df)
-        context_parts += ["", f"=== ANNOUNCEMENT PAGE COMMENTS ({n_ec} total) ==="]
-        context_parts.append(
-            "These comments were posted directly under the update announcement "
-            "and represent the most direct player reaction to this specific update."
-        )
-        # Sample up to 10 comments, prefer those with more upvotes
-        sample = event_df.copy()
-        if "votes_up" in sample.columns:
-            sample = sample.sort_values("votes_up", ascending=False)
-        for _, row in sample.head(10).iterrows():
-            text    = str(row.get("review_content", "")).strip()[:200]
-            upvotes = int(row.get("votes_up", 0))
-            up_str  = f"  [{upvotes}👍]" if upvotes > 0 else ""
-            context_parts.append(f"  •{up_str} {text}")
-    else:
-        context_parts += ["", "=== ANNOUNCEMENT PAGE COMMENTS ===",
-                          "(none available — game may use JS-rendered comments)"]
+        context_parts += ["=== PATCH NOTES ===", "(none available)"]
 
     context = "\n".join(context_parts)
 
@@ -154,25 +170,28 @@ def recommendation_node(state: PipelineState) -> dict:
             messages=[{"role": "user", "content": context}],
         )
         raw    = msg.content[0].text.strip()
-        parsed = json.loads(raw)
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
 
+        parsed = json.loads(raw)
         items = [
             RecommendationItem(
-                priority=        item["priority"],
-                issue=           item["issue"],
-                action=          item["action"],
-                expected_impact= item["expected_impact"],
+                priority=item["priority"],
+                issue=item["issue"],
+                action=item["action"],
+                expected_impact=item["expected_impact"],
             )
             for item in parsed.get("items", [])
         ]
-
         recommendations = Recommendations(
-            narrative= parsed.get("narrative", ""),
-            items=     items,
+            narrative=parsed.get("narrative", ""),
+            items=items,
         )
-
     except Exception as exc:
-        # Graceful degradation — return a minimal report
         recommendations = Recommendations(
             narrative=f"Analysis complete. Risk level: {analysis.overall_risk}. "
                       f"Sentiment delta: {analysis.sentiment_delta:+.3f}. "
