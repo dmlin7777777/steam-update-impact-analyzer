@@ -52,13 +52,6 @@ class RiskSignal(BaseModel):
     description: str
 
 
-class ReviewDecision(BaseModel):
-    """LLM decision on a single flagged review."""
-    index:    int
-    decision: Literal["keep", "remove", "uncertain"]
-    reason:   str
-
-
 class RecommendationItem(BaseModel):
     priority:        Literal["P1", "P2", "P3"]
     issue:           str
@@ -86,15 +79,6 @@ class ScraperOutput(BaseModel):
 class CleaningOutput(BaseModel):
     n_cleaned:          int
     n_flagged:          int
-    flagged_ratio:      float
-    trigger_llm_review: bool
-
-
-class LLMReviewOutput(BaseModel):
-    decisions:   list[ReviewDecision]
-    n_kept:      int
-    n_removed:   int
-    n_uncertain: int
 
 
 class EventAnalysisResult(BaseModel):
@@ -160,13 +144,11 @@ class PipelineState(TypedDict):
 
     # ── Cleaned (post-update reviews only) ─────────────────────────────────
     cleaned_reviews: Optional[pd.DataFrame]
-    flagged_reviews: Optional[pd.DataFrame]
 
     # ── Analysis ───────────────────────────────────────────────────────────
     analysis: Optional[AnalysisOutput]
 
-    # ── LLM outputs (append-mode reducers) ─────────────────────────────────
-    llm_review_log:  Annotated[list[LLMReviewOutput], add]
+    # ── LLM outputs ───────────────────────────────────────────────────────
     recommendations: Optional[Recommendations]
 
     # ── Pipeline metadata ───────────────────────────────────────────────────

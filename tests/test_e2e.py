@@ -71,10 +71,6 @@ _FAKE_NEWS = {
     }
 }
 
-_FAKE_LLM_REVIEW = json.dumps({
-    "results": [{"index": 0, "decision": "remove", "reason": "too short"}]
-})
-
 _FAKE_LLM_TOPICS = json.dumps(["gameplay", "bugs", "performance"])
 
 _FAKE_LLM_RECO = json.dumps({
@@ -125,10 +121,10 @@ def test_pipeline_runs_end_to_end(mock_get_client, mock_get, mock_fetch_ec):
         n = call_count[0]
         call_count[0] += 1
         if n == 0:
-            resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_REVIEW))]
-        elif n == 1:
+            # analysis_node → tag_topics
             resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_TOPICS))]
         else:
+            # recommendation_node
             resp.choices = [MagicMock(message=MagicMock(content=_FAKE_LLM_RECO))]
         return resp
 
@@ -146,9 +142,7 @@ def test_pipeline_runs_end_to_end(mock_get_client, mock_get, mock_fetch_ec):
         "patch_notes":    [],
         "event_comments": None,
         "cleaned_reviews": None,
-        "flagged_reviews": None,
         "analysis":       None,
-        "llm_review_log": [],
         "recommendations": None,
         "current_step":   "start",
         "errors":         [],

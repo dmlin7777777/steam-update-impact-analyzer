@@ -178,9 +178,7 @@ def _run_pipeline(appid: str, update_date: datetime) -> None:
         "patch_notes":      [],
         "event_comments":   None,
         "cleaned_reviews":  None,
-        "flagged_reviews":  None,
         "analysis":         None,
-        "llm_review_log":   [],
         "recommendations":  None,
         "current_step":     "start",
         "errors":           [],
@@ -189,7 +187,6 @@ def _run_pipeline(appid: str, update_date: datetime) -> None:
     _NODE_LABELS = {
         "scraper":        "🌐 Fetching reviews & patch notes",
         "cleaning":       "🧹 Cleaning reviews",
-        "llm_review":     "🤖 LLM: reviewing flagged content",
         "analysis":       "📊 Running sentiment & topic analysis",
         "llm_sentiment":  "🤖 LLM: re-scoring ambiguous reviews",
         "recommendation": "✍️  LLM: generating report",

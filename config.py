@@ -38,8 +38,6 @@ ANALYSIS_POST_DAYS = 7       # days after  update date  → impact window
 # ── NLP thresholds ────────────────────────────────────────────────────────────
 # VADER compound score in (-VADER_GRAY_LO, VADER_GRAY_HI) → send to LLM
 VADER_GRAY_LO = 0.2          # |compound| below this is ambiguous
-LLM_REVIEW_THRESHOLD = 0.05  # flagged-review ratio that triggers LLM cleaning pass
-
 # Topic labels used for Claude-based classification (genre-agnostic)
 TOPIC_LABELS = [
     "performance",    # FPS drops, lag, crashes, load times

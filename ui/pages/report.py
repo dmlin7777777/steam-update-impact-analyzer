@@ -1,12 +1,12 @@
 # ui/pages/report.py
-# Report tab: narrative summary + structured recommendations + LLM decision log.
+# Report tab: narrative summary + structured recommendations.
 
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
-from agents.state import LLMReviewOutput, Recommendations
+from agents.state import Recommendations
 
 _PRIORITY_COLOUR = {"P1": "#e74c3c", "P2": "#f39c12", "P3": "#27ae60"}
 _PRIORITY_LABEL  = {"P1": "P1 Urgent", "P2": "P2 Important", "P3": "P3 Nice-to-have"}
@@ -77,24 +77,6 @@ def render_report(result: dict) -> None:
         st.success("No immediate action items identified.")
 
     st.divider()
-
-    # ── LLM decision log (collapsible) ───────────────────────────────────────
-    st.subheader("LLM Review Log")
-    llm_log: list[LLMReviewOutput] = result.get("llm_review_log", [])
-
-    if not llm_log:
-        st.caption("No LLM cleaning review was triggered (flagged ratio below threshold).")
-    else:
-        for i, entry in enumerate(llm_log):
-            with st.expander(
-                f"Review pass #{i + 1} -- kept {entry.n_kept}, "
-                f"removed {entry.n_removed}, uncertain {entry.n_uncertain}"
-            ):
-                rows = [
-                    {"Index": d.index, "Decision": d.decision.upper(), "Reason": d.reason}
-                    for d in entry.decisions
-                ]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     # ── Raw analysis numbers (debug/transparency) ────────────────────────────
     if analysis:

@@ -5,8 +5,6 @@ import re
 
 import pandas as pd
 
-from config import LLM_REVIEW_THRESHOLD
-
 
 def _is_repeated_chars(text: str) -> bool:
     """Return True if the text consists entirely of one repeated character (e.g. 'aaaaaa')."""
@@ -57,8 +55,3 @@ def run_cleaning(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return cleaned_df, flagged_df
 
 
-def should_trigger_llm_review(flagged_df: pd.DataFrame, total: int) -> bool:
-    """Return True when flagged rows exceed LLM_REVIEW_THRESHOLD of the original total."""
-    if total == 0:
-        return False
-    return (len(flagged_df) / total) > LLM_REVIEW_THRESHOLD

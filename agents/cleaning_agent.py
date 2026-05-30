@@ -1,19 +1,26 @@
 # agents/cleaning_agent.py
-# LangGraph node + conditional edge for post-update review cleaning.
+# LangGraph node: remove null/empty reviews + run feature extraction.
+#
+# Why no LLM review step?
+# -----------------------
+# Steam enforces a minimum review length (~20 chars at platform level).
+# The cleaning rules (short text <10 chars, repeated chars, high special-char
+# ratio) have a verified 0% trigger rate across 71k real Steam reviews.
+# The former llm_review_node conditional branch was removed as dead code.
 
 from __future__ import annotations
 
-from agents.state import CleaningOutput, PipelineState
-from core.cleaning import run_cleaning, should_trigger_llm_review
+from agents.state import PipelineState
+from core.cleaning import run_cleaning
 from core.features import extract_features
 
 
 def cleaning_node(state: PipelineState) -> dict:
     """
     Reads:  post_reviews
-    Writes: cleaned_reviews, flagged_reviews, current_step
+    Writes: cleaned_reviews, current_step
 
-    Also runs feature extraction on cleaned_reviews so downstream
+    Removes null/empty reviews and runs feature extraction so downstream
     agents have vader_compound, sentiment_label, etc. immediately.
     """
     df = state.get("post_reviews")
@@ -21,7 +28,6 @@ def cleaning_node(state: PipelineState) -> dict:
     if df is None or df.empty:
         return {
             "cleaned_reviews": df,
-            "flagged_reviews": None,
             "current_step":   "cleaning_done",
             "errors":         ["WARN: [cleaning] post_reviews is empty — nothing to clean"],
         }
@@ -32,35 +38,9 @@ def cleaning_node(state: PipelineState) -> dict:
     if not cleaned.empty:
         cleaned = extract_features(cleaned)
 
-    total = len(cleaned) + len(flagged)
-    output = CleaningOutput(
-        n_cleaned=          len(cleaned),
-        n_flagged=          len(flagged),
-        flagged_ratio=      round(len(flagged) / total, 4) if total else 0.0,
-        trigger_llm_review= should_trigger_llm_review(flagged, total),
-    )
-
     return {
         "cleaned_reviews": cleaned,
-        "flagged_reviews": flagged,
         "current_step":   "cleaning_done",
-        # Surface summary in errors list only on warning-level issues
-        **({"errors": [f"INFO: [cleaning] {output.n_flagged} rows flagged ({output.flagged_ratio:.1%})"]}
-           if output.n_flagged > 0 else {}),
+        **({"errors": [f"INFO: [cleaning] {len(flagged)} rows flagged and excluded"]}
+           if len(flagged) > 0 else {}),
     }
-
-
-def should_run_llm_review(state: PipelineState) -> str:
-    """
-    Conditional edge: route to llm_review if flagged ratio > threshold,
-    otherwise go straight to analysis.
-    """
-    flagged = state.get("flagged_reviews")
-    cleaned = state.get("cleaned_reviews")
-
-    total = (len(cleaned) if cleaned is not None else 0) + \
-            (len(flagged) if flagged is not None else 0)
-
-    if flagged is not None and should_trigger_llm_review(flagged, total):
-        return "llm_review"
-    return "analysis"
