@@ -2,15 +2,15 @@
 # Centralised LLM client — all API calls go through here.
 #
 # Supports DeepSeek (OpenAI-compatible) as the default provider.
-# Switch provider by changing LLM_PROVIDER in config.py.
+# API key resolution: env var DEEPSEEK_API_KEY → config.LLM_API_KEY_FALLBACK
 
 from __future__ import annotations
+
+import os
 
 from openai import OpenAI
 
 from config import LLM_API_BASE, LLM_API_KEY_ENV
-
-import os
 
 _client: OpenAI | None = None
 
@@ -33,6 +33,7 @@ def chat(
     system: str,
     user: str,
     max_tokens: int = 1024,
+    json_mode: bool = False,
 ) -> str:
     """
     Send a single-turn chat completion and return the assistant's text.
@@ -42,10 +43,11 @@ def chat(
     in one place.
 
     Args:
-        model:      Model identifier (e.g. "deepseek-chat").
+        model:      Model identifier (e.g. "deepseek-v4-pro").
         system:     System prompt text.
         user:       User message text.
         max_tokens: Maximum tokens in the response.
+        json_mode:  If True, request JSON output via response_format.
 
     Returns:
         The assistant's response text (stripped).
@@ -54,7 +56,7 @@ def chat(
         Exception on API errors — callers should handle gracefully.
     """
     client = get_client()
-    response = client.chat.completions.create(
+    kwargs: dict = dict(
         model=model,
         max_tokens=max_tokens,
         messages=[
@@ -62,4 +64,7 @@ def chat(
             {"role": "user",   "content": user},
         ],
     )
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content.strip()

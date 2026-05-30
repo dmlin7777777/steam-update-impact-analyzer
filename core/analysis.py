@@ -126,7 +126,7 @@ def build_distribution_summary(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-# ── Topic tagging (Claude haiku, batched) — reviews only ─────────────────────
+# ── Topic tagging (LLM batched) — reviews only ───────────────────────────────
 
 _TOPIC_SYSTEM = (
     "You are a game review analyst. Classify each review into exactly ONE topic "
@@ -137,7 +137,7 @@ _TOPIC_SYSTEM = (
 
 def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
     """
-    Add a 'topic' column to df using Claude haiku batch classification.
+    Add a 'topic' column to df using LLM batch classification.
     Falls back to 'other' on any error.
     Requires column: review_content_processed
     """
@@ -158,8 +158,12 @@ def tag_topics(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
                 model=LLM_MODEL_LIGHT,
                 system=_TOPIC_SYSTEM,
                 user=numbered,
-                max_tokens=512,
+                max_tokens=2048,
             )
+            # Strip code fences (DeepSeek sometimes wraps JSON in ```json)
+            import re
+            raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
+            raw = re.sub(r'\n?```\s*$', '', raw)
             parsed: list[str] = json.loads(raw)
             parsed = [lbl if lbl in TOPIC_LABELS else "other" for lbl in parsed]
             if len(parsed) < len(chunk):

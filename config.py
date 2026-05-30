@@ -65,5 +65,5 @@ LLM_API_BASE    = "https://api.deepseek.com"    # OpenAI-compatible endpoint
 LLM_API_KEY_ENV = "DEEPSEEK_API_KEY"            # env var name for the API key
 
 # ── LLM models ────────────────────────────────────────────────────────────────
-LLM_MODEL       = "deepseek-chat"               # deep analysis, recommendations
-LLM_MODEL_LIGHT = "deepseek-chat"               # cleaning, topic tagging, map-reduce
+LLM_MODEL       = "deepseek-chat"               # deep analysis, recommendations, reduce
+LLM_MODEL_LIGHT = "deepseek-chat"               # cleaning, topic tagging, map

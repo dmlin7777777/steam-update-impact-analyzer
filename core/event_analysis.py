@@ -17,22 +17,25 @@
 # preserves information across the aggregation boundary.
 #
 # Architecture:
-#   Map   : Chunk comments (~100 per chunk) -> Haiku reads each chunk ->
+#   Map   : Chunk comments (~100 per chunk) -> V4 Flash reads each chunk ->
 #           structured JSON (sentiment counts, themes, representative quotes)
-#   Reduce: Aggregate structured outputs -> one Sonnet call with aggregated
+#   Reduce: Aggregate structured outputs -> one V4 Pro call with aggregated
 #           stats + representative quotes -> final qualitative assessment
 
 from __future__ import annotations
 
 import json
 import math
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from config import LLM_MODEL, LLM_MODEL_LIGHT
 from core.llm import chat as llm_chat
 
-CHUNK_SIZE = 100  # comments per Map call
+CHUNK_SIZE = 50   # comments per Map call (DeepSeek V4 Flash is reliable at 50,
+                   # starts returning empty above ~70 with real-world comment lengths)
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -83,11 +86,21 @@ Rules:
 - Return ONLY the JSON object, no other text."""
 
 
+def _strip_code_fence(raw: str) -> str:
+    """Strip markdown code fences (```, ```json, etc.) from LLM output."""
+    # Remove opening fence: ```json, ```JSON, ```, etc.
+    raw = re.sub(r'^```(?:json|JSON)?\s*\n?', '', raw.strip())
+    # Remove closing fence
+    raw = re.sub(r'\n?```\s*$', '', raw)
+    return raw.strip()
+
+
 def _map_chunk(
     comments: list[str],
     patch_context: str,
+    max_retries: int = 3,
 ) -> ChunkAnalysis:
-    """Run one Map call on a chunk of comments."""
+    """Run one Map call on a chunk of comments with retry on parse failure."""
     numbered = "\n".join(f"[{i+1}] {c}" for i, c in enumerate(comments))
 
     user_msg = f"""Update context (from patch notes):
@@ -97,33 +110,37 @@ def _map_chunk(
 {len(comments)} player comments to analyse:
 {numbered}"""
 
-    try:
-        raw = llm_chat(
-            model=LLM_MODEL_LIGHT,
-            system=_MAP_SYSTEM,
-            user=user_msg,
-            max_tokens=1024,
-        )
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
+    for attempt in range(max_retries):
+        try:
+            raw = llm_chat(
+                model=LLM_MODEL_LIGHT,
+                system=_MAP_SYSTEM,
+                user=user_msg,
+                max_tokens=2048,
+                json_mode=True,
+            )
+            if not raw or not raw.strip():
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return ChunkAnalysis(total=len(comments))
 
-        d = json.loads(raw)
-        sent = d.get("sentiment", {})
-        return ChunkAnalysis(
-            positive=int(sent.get("positive", 0)),
-            negative=int(sent.get("negative", 0)),
-            neutral=int(sent.get("neutral", 0)),
-            themes=d.get("themes", []),
-            quotes=d.get("quotes", []),
-            total=len(comments),
-        )
-    except Exception:
-        # On any failure, return a zero-result chunk rather than crashing
-        return ChunkAnalysis(total=len(comments))
+            raw = _strip_code_fence(raw)
+            d = json.loads(raw)
+            sent = d.get("sentiment", {})
+            return ChunkAnalysis(
+                positive=int(sent.get("positive", 0)),
+                negative=int(sent.get("negative", 0)),
+                neutral=int(sent.get("neutral", 0)),
+                themes=d.get("themes", []),
+                quotes=d.get("quotes", []),
+                total=len(comments),
+            )
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            return ChunkAnalysis(total=len(comments))
 
 
 # ── Aggregation ──────────────────────────────────────────────────────────────
