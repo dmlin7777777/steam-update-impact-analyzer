@@ -174,17 +174,23 @@ def test_feature_extraction_columns():
     assert expected.issubset(set(df.columns)), f"Missing: {expected - set(df.columns)}"
 
 
-def test_cleaning_flags_short_text():
-    """Unit test: run_cleaning flags reviews shorter than 10 chars."""
+def test_cleaning_excludes_non_analysable():
+    """Unit test: run_cleaning excludes non-English and punctuation-only reviews."""
     from core.cleaning import run_cleaning
 
     df = pd.DataFrame({
-        "review_content": ["ok", "This is a wonderful and detailed game review."]
+        "review_content": [
+            "This is a wonderful and detailed game review.",  # keep
+            "...",                                            # punctuation_only
+            "",                                               # null_or_empty
+        ]
     })
-    cleaned, flagged = run_cleaning(df)
-    assert len(flagged) == 1
+    cleaned, excluded = run_cleaning(df)
     assert len(cleaned) == 1
-    assert flagged.iloc[0]["review_content"] == "ok"
+    assert len(excluded) == 2
+    reasons = set(excluded["exclude_reason"])
+    assert "punctuation_only" in reasons
+    assert "null_or_empty" in reasons
 
 
 def test_sentiment_stats_empty_df():

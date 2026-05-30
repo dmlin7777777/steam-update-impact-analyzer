@@ -1,12 +1,9 @@
 # agents/cleaning_agent.py
-# LangGraph node: remove null/empty reviews + run feature extraction.
+# LangGraph node: exclude non-analysable and spam/bot reviews, run feature extraction.
 #
-# Why no LLM review step?
-# -----------------------
-# Steam enforces a minimum review length (~20 chars at platform level).
-# The cleaning rules (short text <10 chars, repeated chars, high special-char
-# ratio) have a verified 0% trigger rate across 71k real Steam reviews.
-# The former llm_review_node conditional branch was removed as dead code.
+# Cleaning is deterministic — no LLM call. Rules are data-driven
+# (validated on 59k CS2 reviews) and literature-backed.
+# See core/cleaning.py for rule details and references.
 
 from __future__ import annotations
 
@@ -20,8 +17,12 @@ def cleaning_node(state: PipelineState) -> dict:
     Reads:  post_reviews
     Writes: cleaned_reviews, current_step
 
-    Removes null/empty reviews and runs feature extraction so downstream
-    agents have vader_compound, sentiment_label, etc. immediately.
+    Two-tier exclusion (see core/cleaning.py):
+      1. Hard exclude: null, non-English, punctuation-only
+      2. Flagged exclude: behavioral spam/bot signals, content anomalies
+
+    Runs feature extraction on surviving reviews so downstream agents
+    have vader_compound, sentiment_label, etc. immediately.
     """
     df = state.get("post_reviews")
 
@@ -32,15 +33,24 @@ def cleaning_node(state: PipelineState) -> dict:
             "errors":         ["WARN: [cleaning] post_reviews is empty — nothing to clean"],
         }
 
-    cleaned, flagged = run_cleaning(df)
+    cleaned, excluded = run_cleaning(df)
 
     # Add NLP features to cleaned reviews right away
     if not cleaned.empty:
         cleaned = extract_features(cleaned)
 
+    errors: list[str] = []
+    if len(excluded) > 0:
+        # Summarize exclusion reasons
+        reason_counts = excluded["exclude_reason"].value_counts()
+        breakdown = ", ".join(f"{reason}={count}" for reason, count in reason_counts.items())
+        errors.append(
+            f"INFO: [cleaning] Excluded {len(excluded)}/{len(excluded)+len(cleaned)} "
+            f"reviews ({breakdown})"
+        )
+
     return {
         "cleaned_reviews": cleaned,
         "current_step":   "cleaning_done",
-        **({"errors": [f"INFO: [cleaning] {len(flagged)} rows flagged and excluded"]}
-           if len(flagged) > 0 else {}),
+        **({"errors": errors} if errors else {}),
     }
