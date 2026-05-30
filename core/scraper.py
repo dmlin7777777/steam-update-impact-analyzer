@@ -173,16 +173,25 @@ def fetch_reviews(
                 break
 
             if ts <= end_dt:
+                author = rev.get("author", {})
+                pa = author.get("playtime_at_review", 0) or 0
+                ph = author.get("playtime_forever", 0) or 0
+                ngo = author.get("num_games_owned", 0) or 0
                 rows.append({
-                    "review_id":      rev["recommendationid"],
-                    "review_content": rev["review"],
-                    "voted_up":       bool(rev["voted_up"]),
-                    "timestamp":      ts,
-                    "playtime_hours": round(
-                        rev.get("author", {}).get("playtime_forever", 0) / 60, 1
-                    ),
-                    "votes_up":    rev.get("votes_up", 0),
-                    "votes_funny": rev.get("votes_funny", 0),
+                    "review_id":           rev["recommendationid"],
+                    "review_content":      rev["review"],
+                    "voted_up":            bool(rev["voted_up"]),
+                    "timestamp":           ts,
+                    "playtime_hours":      round((pa or ph) / 60, 1),
+                    "votes_up":            rev.get("votes_up", 0),
+                    "votes_funny":         rev.get("votes_funny", 0),
+                    "num_games_owned":     ngo if ngo > 0 else -1,
+                    "num_reviews":         author.get("num_reviews", 0) or 0,
+                    "playtime_at_review":  pa,
+                    "steam_purchase":      int(rev.get("steam_purchase", True)),
+                    "received_for_free":   int(rev.get("received_for_free", False)),
+                    "weighted_vote_score": rev.get("weighted_vote_score", 0),
+                    "language":            rev.get("language", "english"),
                 })
             # else: review is in the future relative to end_dt — skip, keep scanning
 

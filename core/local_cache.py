@@ -16,14 +16,22 @@
 # Schema
 # ------
 # Table: reviews
-#   appid          TEXT   Steam App ID
-#   review_id      TEXT   recommendationid (or surrogate key for legacy data)
-#   review_content TEXT   raw review text
-#   voted_up       INT    1 = positive, 0 = negative
-#   timestamp      TEXT   ISO-8601 UTC (sortable: "YYYY-MM-DD HH:MM:SS")
-#   playtime_hours REAL   hours played at review time
-#   votes_up       INT
-#   votes_funny    INT
+#   appid                TEXT   Steam App ID
+#   review_id            TEXT   recommendationid (or surrogate key for legacy data)
+#   review_content       TEXT   raw review text
+#   voted_up             INT    1 = positive, 0 = negative
+#   timestamp            TEXT   ISO-8601 UTC (sortable: "YYYY-MM-DD HH:MM:SS")
+#   playtime_hours       REAL   hours played at review time (playtime_at_review preferred)
+#   votes_up             INT
+#   votes_funny          INT
+#   -- Behavioral metadata (added for spam/bot detection) --
+#   num_games_owned      INT    -1 = private account
+#   num_reviews          INT    total reviews by this author
+#   playtime_at_review   REAL   minutes played at review time (raw Steam value)
+#   steam_purchase       INT    1 = purchased on Steam, 0 = other
+#   received_for_free    INT    1 = received free copy
+#   weighted_vote_score  REAL   Steam's helpfulness weight
+#   language             TEXT   review language tag
 #
 # Index: (appid, timestamp) for fast range queries.
 
@@ -42,18 +50,27 @@ from config import REVIEW_CACHE_DB
 _EMPTY_COLUMNS = [
     "review_id", "review_content", "voted_up",
     "timestamp", "playtime_hours", "votes_up", "votes_funny",
+    "num_games_owned", "num_reviews", "playtime_at_review",
+    "steam_purchase", "received_for_free", "weighted_vote_score", "language",
 ]
 
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS reviews (
-    appid          TEXT NOT NULL,
-    review_id      TEXT NOT NULL,
-    review_content TEXT NOT NULL,
-    voted_up       INT  NOT NULL,
-    timestamp      TEXT NOT NULL,
-    playtime_hours REAL NOT NULL DEFAULT 0,
-    votes_up       INT  NOT NULL DEFAULT 0,
-    votes_funny    INT  NOT NULL DEFAULT 0,
+    appid               TEXT NOT NULL,
+    review_id           TEXT NOT NULL,
+    review_content      TEXT NOT NULL,
+    voted_up            INT  NOT NULL,
+    timestamp           TEXT NOT NULL,
+    playtime_hours      REAL NOT NULL DEFAULT 0,
+    votes_up            INT  NOT NULL DEFAULT 0,
+    votes_funny         INT  NOT NULL DEFAULT 0,
+    num_games_owned     INT  NOT NULL DEFAULT -1,
+    num_reviews         INT  NOT NULL DEFAULT 0,
+    playtime_at_review  REAL NOT NULL DEFAULT 0,
+    steam_purchase      INT  NOT NULL DEFAULT 1,
+    received_for_free   INT  NOT NULL DEFAULT 0,
+    weighted_vote_score REAL NOT NULL DEFAULT 0,
+    language            TEXT NOT NULL DEFAULT 'english',
     PRIMARY KEY (appid, review_id)
 );
 CREATE INDEX IF NOT EXISTS idx_appid_ts ON reviews (appid, timestamp);
@@ -89,6 +106,26 @@ def init_db() -> None:
     """Create the reviews table and index if they do not yet exist."""
     with _connect() as conn:
         conn.executescript(_CREATE_SQL)
+        _migrate_reviews_schema(conn)
+
+
+def _migrate_reviews_schema(conn: sqlite3.Connection) -> None:
+    """Add behavioral metadata columns to existing reviews table (idempotent)."""
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+    }
+    migrations = [
+        ("num_games_owned",     "INT  NOT NULL DEFAULT -1"),
+        ("num_reviews",         "INT  NOT NULL DEFAULT 0"),
+        ("playtime_at_review",  "REAL NOT NULL DEFAULT 0"),
+        ("steam_purchase",      "INT  NOT NULL DEFAULT 1"),
+        ("received_for_free",   "INT  NOT NULL DEFAULT 0"),
+        ("weighted_vote_score", "REAL NOT NULL DEFAULT 0"),
+        ("language",            "TEXT NOT NULL DEFAULT 'english'"),
+    ]
+    for col_name, col_def in migrations:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE reviews ADD COLUMN {col_name} {col_def}")
 
 
 # ── Import helpers ────────────────────────────────────────────────────────────
@@ -133,7 +170,29 @@ def _normalise_legacy_df(df: pd.DataFrame, appid: str) -> pd.DataFrame:
 
     out["votes_up"]    = pd.to_numeric(df.get("votes_up",    0), errors="coerce").fillna(0).astype(int)
     out["votes_funny"] = pd.to_numeric(df.get("votes_funny", 0), errors="coerce").fillna(0).astype(int)
-    out["appid"]       = str(appid)
+
+    # Behavioral metadata
+    if "num_games_owned" in df.columns:
+        out["num_games_owned"] = pd.to_numeric(
+            df["num_games_owned"].replace("Private Account", -1),
+            errors="coerce",
+        ).fillna(-1).astype(int)
+    else:
+        out["num_games_owned"] = -1
+
+    out["num_reviews"] = pd.to_numeric(df.get("num_reviews", 0), errors="coerce").fillna(0).astype(int)
+
+    if "playtime_at_review" in df.columns:
+        out["playtime_at_review"] = pd.to_numeric(df["playtime_at_review"], errors="coerce").fillna(0)
+    else:
+        out["playtime_at_review"] = 0.0
+
+    out["steam_purchase"]      = pd.to_numeric(df.get("steam_purchase", 1), errors="coerce").fillna(1).astype(int)
+    out["received_for_free"]   = pd.to_numeric(df.get("received_for_free", 0), errors="coerce").fillna(0).astype(int)
+    out["weighted_vote_score"] = pd.to_numeric(df.get("weighted_vote_score", 0), errors="coerce").fillna(0.0)
+    out["language"]            = df.get("language", pd.Series("english", index=df.index)).fillna("english").astype(str)
+
+    out["appid"] = str(appid)
 
     # Drop rows where timestamp couldn't be parsed or content is empty
     out = out.dropna(subset=["timestamp"])
@@ -144,14 +203,32 @@ def _normalise_legacy_df(df: pd.DataFrame, appid: str) -> pd.DataFrame:
 def _normalise_new_df(df: pd.DataFrame, appid: str) -> pd.DataFrame:
     """
     Convert a new-style scraper DataFrame (core/scraper.py schema) to cache
-    format.  New schema already uses: review_id, review_content, voted_up,
-    timestamp, playtime_hours, votes_up, votes_funny.
+    format.  New schema uses: review_id, review_content, voted_up,
+    timestamp, playtime_hours, votes_up, votes_funny, plus behavioral metadata.
     """
-    out = df[["review_id", "review_content", "voted_up",
-              "timestamp", "playtime_hours", "votes_up", "votes_funny"]].copy()
+    base_cols = ["review_id", "review_content", "voted_up",
+                 "timestamp", "playtime_hours", "votes_up", "votes_funny"]
+    out = df[base_cols].copy()
     out["appid"]    = str(appid)
     out["voted_up"] = out["voted_up"].astype(int)
     out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+
+    # Behavioral metadata — use if present, else defaults
+    meta_defaults = {
+        "num_games_owned":     -1,
+        "num_reviews":          0,
+        "playtime_at_review":   0.0,
+        "steam_purchase":       1,
+        "received_for_free":    0,
+        "weighted_vote_score":  0.0,
+        "language":             "english",
+    }
+    for col, default in meta_defaults.items():
+        if col in df.columns:
+            out[col] = df[col].fillna(default)
+        else:
+            out[col] = default
+
     out = out.dropna(subset=["timestamp"])
     return out
 
@@ -180,14 +257,18 @@ def import_dataframe(df: pd.DataFrame, appid: str, legacy: bool = True) -> int:
 
     # Build list of tuples for executemany — avoids SQLite variable-count limits
     cols = ["appid", "review_id", "review_content", "voted_up",
-            "timestamp", "playtime_hours", "votes_up", "votes_funny"]
+            "timestamp", "playtime_hours", "votes_up", "votes_funny",
+            "num_games_owned", "num_reviews", "playtime_at_review",
+            "steam_purchase", "received_for_free", "weighted_vote_score", "language"]
     rows = [tuple(r) for r in normalised[cols].itertuples(index=False, name=None)]
 
     sql = """
         INSERT OR IGNORE INTO reviews
             (appid, review_id, review_content, voted_up,
-             timestamp, playtime_hours, votes_up, votes_funny)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             timestamp, playtime_hours, votes_up, votes_funny,
+             num_games_owned, num_reviews, playtime_at_review,
+             steam_purchase, received_for_free, weighted_vote_score, language)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     _CHUNK = 2000  # rows per executemany call
     inserted = 0
@@ -263,7 +344,9 @@ def query_reviews(
         rows = conn.execute(
             """
             SELECT review_id, review_content, voted_up, timestamp,
-                   playtime_hours, votes_up, votes_funny
+                   playtime_hours, votes_up, votes_funny,
+                   num_games_owned, num_reviews, playtime_at_review,
+                   steam_purchase, received_for_free, weighted_vote_score, language
             FROM   reviews
             WHERE  appid = ?
               AND  timestamp >= ?
@@ -277,11 +360,17 @@ def query_reviews(
         return pd.DataFrame(columns=_EMPTY_COLUMNS)
 
     df = pd.DataFrame(rows, columns=_EMPTY_COLUMNS)
-    df["timestamp"]     = pd.to_datetime(df["timestamp"], utc=True)
-    df["voted_up"]      = df["voted_up"].astype(bool)
+    df["timestamp"]      = pd.to_datetime(df["timestamp"], utc=True)
+    df["voted_up"]       = df["voted_up"].astype(bool)
     df["playtime_hours"] = df["playtime_hours"].astype(float)
-    df["votes_up"]      = df["votes_up"].astype(int)
-    df["votes_funny"]   = df["votes_funny"].astype(int)
+    df["votes_up"]       = df["votes_up"].astype(int)
+    df["votes_funny"]    = df["votes_funny"].astype(int)
+    df["num_games_owned"]    = df["num_games_owned"].astype(int)
+    df["num_reviews"]        = df["num_reviews"].astype(int)
+    df["playtime_at_review"] = df["playtime_at_review"].astype(float)
+    df["steam_purchase"]     = df["steam_purchase"].astype(int)
+    df["received_for_free"]  = df["received_for_free"].astype(int)
+    df["weighted_vote_score"] = df["weighted_vote_score"].astype(float)
     return df
 
 
