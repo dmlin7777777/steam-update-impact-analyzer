@@ -163,8 +163,3 @@ python -m pytest tests/test_e2e.py -v
 
 覆盖：E2E 管线冒烟测试（全 Mock）+ 特征提取 + 清洗规则 + 情感统计边界
 
----
-
-## 课程背景
-
-本项目为新加坡国立大学（NUS）商业分析硕士课程 Business Analytics Project 作品，探索多智能体系统在游戏运营决策支持场景下的应用。
