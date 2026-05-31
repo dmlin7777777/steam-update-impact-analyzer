@@ -30,6 +30,7 @@ models/
 
 # Claude Code
 .claude/
+.workbuddy/
 
 # 环境
 .env
